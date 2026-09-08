@@ -55,6 +55,16 @@ def test_slugify():
     assert t.slugify("Push Notification  Deeplink!") == "push-notification-deeplink"
 
 
+def test_own_skill_copy_is_in_sync():
+    """This repo dogfoods trail, so it holds two copies of SKILL.md.
+    They must not drift; the source of truth is skills/trail/."""
+    src = HERE / "skills" / "trail" / "SKILL.md"
+    dest = HERE / ".claude" / "skills" / "trail" / "SKILL.md"
+    if dest.exists():
+        assert src.read_text("utf-8") == dest.read_text("utf-8"), \
+            "SKILL.md kopyalari ayrismis: 'trail init' ile tazele"
+
+
 def run(cwd, *args, **kw):
     r = subprocess.run([sys.executable, str(BIN)] + list(args),
                        cwd=str(cwd), capture_output=True, text=True, env=kw.get("env"))
