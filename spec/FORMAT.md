@@ -14,6 +14,10 @@ is the product.
 DECISIONS.md          distilled decisions — permanent, versioned with the code
 ```
 
+`trail init` also drops `SKILL.md` where the repo's agents look for project skills:
+`.claude/skills/trail/` for Claude Code, `.agents/skills/trail/` for Codex, Cursor and
+Gemini CLI. There is no single path every agent reads.
+
 `DECISIONS.md` sits outside `.trail/` on purpose: if a user gitignores `.trail/`,
 the permanent artifact still gets committed.
 

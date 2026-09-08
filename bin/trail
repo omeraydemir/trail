@@ -20,6 +20,21 @@ VERSION = "0.1.0"
 STATUSES = ["open", "active", "blocked", "done"]
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
+# Where each agent reads project skills from. Claude Code does NOT read
+# .agents/skills/; the others do. Verified against the vendors' docs, not guessed.
+AGENT_SKILL_PATHS = {
+    "claude": ".claude/skills/trail/SKILL.md",
+    "codex": ".agents/skills/trail/SKILL.md",
+    "cursor": ".agents/skills/trail/SKILL.md",
+    "gemini": ".agents/skills/trail/SKILL.md",
+}
+AGENT_MARKERS = {
+    "claude": ".claude",
+    "codex": ".codex",
+    "cursor": ".cursor",
+    "gemini": ".gemini",
+}
+
 DEFAULTS = {
     "dir": ".trail/tasks",
     "archive": ".trail/archive",
@@ -290,8 +305,14 @@ def cmd_init(args) -> int:
 
     copy(INSTALL_ROOT / "templates" / "config.yml", root / ".trail" / "config.yml")
     copy(INSTALL_ROOT / "templates" / "_template.md", root / ".trail" / "_template.md")
-    copy(INSTALL_ROOT / ".agents" / "skills" / "trail" / "SKILL.md",
-         root / ".agents" / "skills" / "trail" / "SKILL.md")
+    agents = args.agent or [a for a, m in AGENT_MARKERS.items() if (root / m).is_dir()]
+    if "all" in agents:
+        agents = list(AGENT_SKILL_PATHS)
+    if not agents:
+        agents = ["claude"]
+    src = INSTALL_ROOT / "skills" / "trail" / "SKILL.md"
+    for dest in sorted({AGENT_SKILL_PATHS[a] for a in agents}):
+        copy(src, root / dest)
 
     dec = root / cfg["decisions"]
     if not dec.exists():
@@ -540,7 +561,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version="trail " + VERSION)
     sub = p.add_subparsers(dest="cmd")
 
-    sub.add_parser("init", help="bu repoda .trail/ iskeletini kur").set_defaults(fn=cmd_init)
+    s = sub.add_parser("init", help="bu repoda .trail/ iskeletini kur")
+    s.add_argument("--agent", action="append",
+                   choices=sorted(AGENT_SKILL_PATHS) + ["all"],
+                   help="SKILL.md nereye yazilsin (varsayilan: repoda bulunanlari algila)")
+    s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("start", help="yeni gorev dosyasi")
     s.add_argument("slug")

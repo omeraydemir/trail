@@ -69,7 +69,16 @@ def test_end_to_end():
         run(tmp, "init")
         assert (tmp / ".trail/tasks").is_dir()
         assert (tmp / "DECISIONS.md").is_file()
+        # no agent markers in a bare repo -> claude is the fallback
+        assert (tmp / ".claude/skills/trail/SKILL.md").is_file()
+        assert not (tmp / ".agents").exists()
+
+        # an existing .codex marker routes the skill to the shared .agents path
+        (tmp / ".codex").mkdir()
+        run(tmp, "init")
         assert (tmp / ".agents/skills/trail/SKILL.md").is_file()
+        # explicit override still works
+        run(tmp, "init", "--agent", "gemini")
 
         run(tmp, "start", "Deep Link", "T2", "--title", "deep link")
         f = tmp / ".trail/tasks/deep-link.md"

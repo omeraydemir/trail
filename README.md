@@ -42,8 +42,11 @@ Then, in any repo:
 trail init
 ```
 
-This creates `.trail/`, `DECISIONS.md`, and `.agents/skills/trail/SKILL.md` — the
-standard Agent Skills path, read by Claude Code, Codex, Gemini CLI and Copilot.
+This creates `.trail/`, `DECISIONS.md`, and a `SKILL.md` for whichever agents the
+repo already uses. Agents disagree about where project skills live — Claude Code
+reads `.claude/skills/`, while Codex, Cursor and Gemini CLI read `.agents/skills/` —
+so `init` detects the marker directories present and writes to the right ones.
+Force it with `trail init --agent claude|codex|cursor|gemini|all`.
 
 ## Use
 
