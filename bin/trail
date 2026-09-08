@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+"""trail - a task ledger that lives in your repo.
+
+Single file, standard library only, Python 3.9+.
+The point is not the task list; it is the decision log inside each task.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+VERSION = "0.1.0"
+STATUSES = ["open", "active", "blocked", "done"]
+INSTALL_ROOT = Path(__file__).resolve().parent.parent
+
+DEFAULTS = {
+    "dir": ".trail/tasks",
+    "archive": ".trail/archive",
+    "decisions": "DECISIONS.md",
+    "template": ".trail/_template.md",
+    "stale_days": 7,
+}
+
+
+class TrailError(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------
+# tiny YAML subset - serves both config.yml and task frontmatter
+# Supports: `key: scalar`, `key:` / `key: []` followed by `- item` lines,
+# and `# comments`. A key with no value is read as an empty list; the only
+# list in the schema is `links`, so that ambiguity costs nothing.
+# --------------------------------------------------------------------------
+
+_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$")
+
+
+def _scalar(s: str) -> str:
+    """Strip a trailing ` # comment`, then surrounding quotes."""
+    s = s.strip()
+    if s[:1] in "\"'":
+        if len(s) >= 2 and s[-1] == s[0]:
+            return s[1:-1]
+        return s
+    return re.sub(r"\s+#.*$", "", s).strip()
+
+
+def parse_yaml(text: str) -> dict:
+    data: dict = {}
+    key = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- ") and key is not None and isinstance(data.get(key), list):
+            data[key].append(_scalar(stripped[2:]))
+            continue
+        m = _KEY_RE.match(line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        if val.startswith("#"):
+            val = ""
+        val = _scalar(val)
+        data[key] = [] if val in ("", "[]") else val
+    return data
+
+
+# --------------------------------------------------------------------------
+# frontmatter: read is lossy, write is surgical (never reserialize)
+# --------------------------------------------------------------------------
+
+def fm_bounds(text: str):
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---\n", 3)
+    if end == -1:
+        return None
+    return 4, end + 1
+
+
+def parse_fm(text: str) -> dict:
+    b = fm_bounds(text)
+    return parse_yaml(text[b[0]:b[1]]) if b else {}
+
+
+def set_field(text: str, key: str, value) -> str:
+    """Replace one frontmatter value in place. Everything else is untouched."""
+    b = fm_bounds(text)
+    if not b:
+        raise TrailError("dosyada frontmatter yok")
+    start, end = b
+    block = text[start:end]
+    pat = re.compile(r"^(" + re.escape(key) + r":)([^\n]*)$", re.M)
+    if pat.search(block):
+        block = pat.sub(lambda m: "%s %s" % (m.group(1), value), block, count=1)
+    else:
+        block = block + "%s: %s\n" % (key, value)
+    return text[:start] + block + text[end:]
+
+
+# --------------------------------------------------------------------------
+# markdown sections
+# --------------------------------------------------------------------------
+
+def section_bounds(text: str, heading: str):
+    m = re.search(r"^##\s+" + re.escape(heading) + r"\s*$", text, re.M)
+    if not m:
+        return None
+    start = min(m.end() + 1, len(text))
+    nxt = re.search(r"^##\s+", text[start:], re.M)
+    end = start + nxt.start() if nxt else len(text)
+    return start, end
+
+
+def get_section(text: str, heading: str) -> str:
+    b = section_bounds(text, heading)
+    if not b:
+        return ""
+    body = text[b[0]:b[1]]
+    keep = [l for l in body.splitlines() if not l.strip().startswith("<!--")]
+    return "\n".join(keep).strip()
+
+
+def set_section(text: str, heading: str, body: str) -> str:
+    b = section_bounds(text, heading)
+    if not b:
+        raise TrailError("'## %s' bolumu yok" % heading)
+    return text[:b[0]] + body.rstrip() + "\n\n" + text[b[1]:]
+
+
+def append_section(text: str, heading: str, line: str) -> str:
+    body = get_section(text, heading)
+    body = (body + "\n" + line) if body else line
+    return set_section(text, heading, body)
+
+
+# --------------------------------------------------------------------------
+# repo / config / tasks
+# --------------------------------------------------------------------------
+
+def find_root(start: Path = None) -> Path:
+    p = (start or Path.cwd()).resolve()
+    for d in [p] + list(p.parents):
+        if (d / ".trail").is_dir():
+            return d
+    for d in [p] + list(p.parents):
+        if (d / ".git").exists():
+            return d
+    return p
+
+
+def load_config(root: Path) -> dict:
+    cfg = dict(DEFAULTS)
+    f = root / ".trail" / "config.yml"
+    if f.is_file():
+        for k, v in parse_yaml(f.read_text("utf-8")).items():
+            if k in cfg and not isinstance(v, list):
+                cfg[k] = v
+    raw = str(cfg["stale_days"]).strip()
+    cfg["stale_days"] = int(raw) if raw.isdigit() else DEFAULTS["stale_days"]
+    return cfg
+
+
+def age_days(ts: float) -> int:
+    return int((datetime.now() - datetime.fromtimestamp(ts)).total_seconds() // 86400)
+
+
+def load_tasks(root: Path, cfg: dict, archived: bool = False) -> list:
+    dirs = [root / cfg["dir"]]
+    if archived:
+        dirs.append(root / cfg["archive"])
+    out = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            if f.name.startswith("_"):
+                continue
+            text = f.read_text("utf-8")
+            fm = parse_fm(text)
+
+            def s(key, fallback):
+                v = fm.get(key)
+                return v if isinstance(v, str) and v else fallback
+
+            out.append({
+                "path": f,
+                "text": text,
+                "fm": fm,
+                "id": s("id", f.stem),
+                "title": s("title", f.stem),
+                "level": s("level", "T1"),
+                "status": s("status", "open"),
+                "started": s("started", ""),
+                "links": fm.get("links") if isinstance(fm.get("links"), list) else [],
+                "mtime": f.stat().st_mtime,
+                "archived": d.name == Path(cfg["archive"]).name,
+            })
+    return out
+
+
+def resolve_task(tasks: list, ident: str = None) -> dict:
+    if ident:
+        for t in tasks:
+            if t["id"] == ident or t["path"].stem == ident:
+                return t
+        raise TrailError("gorev bulunamadi: %s" % ident)
+    active = [t for t in tasks if t["status"] == "active"]
+    if len(active) == 1:
+        return active[0]
+    if not active:
+        raise TrailError("aktif gorev yok. 'trail start <slug>' ya da --task ver.")
+    ids = ", ".join(t["id"] for t in active)
+    raise TrailError("birden fazla aktif gorev var, --task ver: %s" % ids)
+
+
+# --------------------------------------------------------------------------
+# git signal: did code change more recently than the task file?
+# --------------------------------------------------------------------------
+
+def code_newer_than(root: Path, ts: float) -> bool:
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return False
+        names = [n.strip() for n in r.stdout.splitlines() if n.strip()]
+    except Exception:
+        return False
+    for n in names:
+        if n.startswith(".trail/") or n == "DECISIONS.md":
+            continue
+        try:
+            if (root / n).stat().st_mtime > ts:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def nudges(root: Path, cfg: dict, tasks: list) -> list:
+    out = []
+    for t in tasks:
+        if t["status"] not in ("active", "blocked"):
+            continue
+        age = age_days(t["mtime"])
+        if age >= cfg["stale_days"]:
+            out.append("%s: %s gundur dokunulmadi. Hala aktif mi? Kapat ya da devam et." % (t["id"], age))
+        elif code_newer_than(root, t["mtime"]):
+            out.append("%s: kod degisti ama kutuk durgun. Karar aldiysan 'trail log' ile yaz." % t["id"])
+    return out
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+def cmd_init(args) -> int:
+    root = Path.cwd().resolve()
+    if (root / ".git").exists() is False:
+        print("uyari: burasi bir git deposu degil gibi gorunuyor", file=sys.stderr)
+    cfg = dict(DEFAULTS)
+    made = []
+
+    for sub in ("tasks", "archive"):
+        d = root / ".trail" / sub
+        d.mkdir(parents=True, exist_ok=True)
+        keep = d / ".gitkeep"
+        if not keep.exists():
+            keep.write_text("", "utf-8")
+
+    def copy(src: Path, dst: Path):
+        if dst.exists():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        made.append(str(dst.relative_to(root)))
+
+    copy(INSTALL_ROOT / "templates" / "config.yml", root / ".trail" / "config.yml")
+    copy(INSTALL_ROOT / "templates" / "_template.md", root / ".trail" / "_template.md")
+    copy(INSTALL_ROOT / ".agents" / "skills" / "trail" / "SKILL.md",
+         root / ".agents" / "skills" / "trail" / "SKILL.md")
+
+    dec = root / cfg["decisions"]
+    if not dec.exists():
+        dec.write_text("# Decisions\n\nDistilled from task decision logs at `trail done`.\n", "utf-8")
+        made.append(cfg["decisions"])
+
+    print("hazir: %s" % root)
+    for m in made:
+        print("  + %s" % m)
+    if not made:
+        print("  (her sey zaten yerinde)")
+    print("\nsonraki: trail start <slug> [T1|T2]")
+    print("not: .trail/ varsayilan olarak commit'lenir. Istemiyorsan .gitignore'a ekle.")
+    return 0
+
+
+def slugify(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
+
+
+def cmd_start(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    tpl = root / cfg["template"]
+    if not tpl.is_file():
+        raise TrailError("sablon yok: %s  ('trail init' calistirdin mi?)" % tpl)
+
+    slug = slugify(args.slug)
+    if not slug:
+        raise TrailError("gecersiz slug")
+    dest = root / cfg["dir"] / (slug + ".md")
+    if dest.exists():
+        raise TrailError("zaten var: %s" % dest.relative_to(root))
+
+    level = (args.level or "T1").upper()
+    if level not in ("T1", "T2"):
+        raise TrailError("seviye T1 ya da T2 olmali (T0 dosya gerektirmez)")
+
+    values = {
+        "id": slug,
+        "title": args.title or slug,
+        "level": level,
+        "status": "active",
+        "date": date.today().isoformat(),
+    }
+    text = tpl.read_text("utf-8")
+    # unknown placeholders are left untouched on purpose
+    for k, v in values.items():
+        text = text.replace("{{%s}}" % k, v)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, "utf-8")
+    print("olusturuldu: %s" % dest.relative_to(root))
+    if level == "T2":
+        print("T2: dosyaya '## Plan' basligini ekle.")
+    return 0
+
+
+def cmd_log(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg), args.task)
+    parts = [date.today().isoformat(), args.text.strip()]
+    if args.why:
+        parts.append("why: " + args.why.strip())
+    if args.dropped:
+        parts.append("dropped: " + args.dropped.strip())
+    line = "- " + " · ".join(parts)
+    text = append_section(task["text"], "Decision Log", line)
+    task["path"].write_text(text, "utf-8")
+    print("%s <- %s" % (task["id"], line))
+    return 0
+
+
+def cmd_handoff(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg), args.task)
+    text = set_section(task["text"], "Status", args.text.strip())
+    task["path"].write_text(text, "utf-8")
+    print("%s: ## Status guncellendi" % task["id"])
+    return 0
+
+
+def cmd_done(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg), args.task)
+
+    log = get_section(task["text"], "Decision Log")
+    dec = root / cfg["decisions"]
+    header = "\n## %s\n\n_%s · %s · %s_\n\n" % (
+        task["title"], date.today().isoformat(), task["level"], task["id"])
+    body = log if log else "_(kutuk bos)_"
+    with dec.open("a", encoding="utf-8") as fh:
+        fh.write(header + body + "\n")
+
+    text = set_field(task["text"], "status", "done")
+    archive = root / cfg["archive"]
+    archive.mkdir(parents=True, exist_ok=True)
+    dest = archive / task["path"].name
+    dest.write_text(text, "utf-8")
+    task["path"].unlink()
+
+    print("kapandi: %s -> %s" % (task["id"], dest.relative_to(root)))
+    print("kutuk eklendi: %s" % cfg["decisions"])
+    editor = os.environ.get("EDITOR")
+    if editor and sys.stdin.isatty() and not args.no_edit:
+        subprocess.call([editor, str(dec)])
+    else:
+        print("SIMDI DAMIT: %s icindeki son bolumu 3-5 satira indir." % cfg["decisions"])
+    return 0
+
+
+def _filter(tasks, args):
+    out = tasks
+    if getattr(args, "status", None):
+        out = [t for t in out if t["status"] == args.status]
+    if getattr(args, "level", None):
+        out = [t for t in out if t["level"].upper() == args.level.upper()]
+    if getattr(args, "stale", None):
+        out = [t for t in out if age_days(t["mtime"]) >= args.stale]
+    return out
+
+
+def _as_dict(t):
+    return {
+        "id": t["id"], "title": t["title"], "level": t["level"],
+        "status": t["status"], "started": t["started"], "links": t["links"],
+        "age_days": age_days(t["mtime"]),
+        "path": str(t["path"]), "archived": t["archived"],
+    }
+
+
+def cmd_ls(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    tasks = _filter(load_tasks(root, cfg, archived=args.all), args)
+    if args.json:
+        print(json.dumps([_as_dict(t) for t in tasks], ensure_ascii=False, indent=2))
+        return 0
+    if not tasks:
+        print("gorev yok")
+        return 0
+    order = {s: i for i, s in enumerate(STATUSES)}
+    tasks.sort(key=lambda t: (order.get(t["status"], 9), -t["mtime"]))
+    w = max(len(t["id"]) for t in tasks)
+    print("%-*s  %-4s  %-8s  %5s  %s" % (w, "ID", "LVL", "STATUS", "AGE", "TITLE"))
+    for t in tasks:
+        print("%-*s  %-4s  %-8s  %4dd  %s" % (
+            w, t["id"], t["level"], t["status"], age_days(t["mtime"]), t["title"]))
+    return 0
+
+
+def cmd_board(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    tasks = load_tasks(root, cfg, archived=args.all)
+    cols = [(s, [t["id"] for t in tasks if t["status"] == s]) for s in STATUSES]
+    width = 18
+    head = "  ".join("%-*s" % (width, "%s (%d)" % (s, len(ids)))[:width] for s, ids in cols)
+    print(head)
+    print("  ".join("-" * width for _ in cols))
+    depth = max([len(ids) for _, ids in cols] + [0])
+    for i in range(depth):
+        row = []
+        for _, ids in cols:
+            row.append("%-*s" % (width, ids[i][:width] if i < len(ids) else ""))
+        print("  ".join(row).rstrip())
+    if depth == 0:
+        print("(bos)")
+    return 0
+
+
+def cmd_show(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg, archived=True), args.task)
+    if args.json:
+        d = _as_dict(task)
+        d["goal"] = get_section(task["text"], "Goal")
+        d["status_note"] = get_section(task["text"], "Status")
+        d["decisions"] = [l for l in get_section(task["text"], "Decision Log").splitlines() if l.strip()]
+        print(json.dumps(d, ensure_ascii=False, indent=2))
+        return 0
+    sys.stdout.write(task["text"])
+    return 0
+
+
+def cmd_status(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    tasks = load_tasks(root, cfg)
+    live = [t for t in tasks if t["status"] in ("active", "blocked")]
+    ns = nudges(root, cfg, tasks)
+
+    if args.json:
+        print(json.dumps({
+            "root": str(root),
+            "tasks": [_as_dict(t) for t in live],
+            "nudges": ns,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    lines = []
+    for t in live:
+        lines.append("Task: %s (%s, %s, started %s)" % (t["id"], t["level"], t["status"], t["started"]))
+        goal = get_section(t["text"], "Goal")
+        if goal:
+            lines.append("Goal: " + goal.replace("\n", " "))
+        st = get_section(t["text"], "Status")
+        if st:
+            lines.append("Status: " + st.replace("\n", " "))
+        if t["links"]:
+            lines.append("Links: " + ", ".join(t["links"]))
+        dec = [l for l in get_section(t["text"], "Decision Log").splitlines() if l.strip()]
+        if dec:
+            lines.append("Recent decisions:")
+            lines.extend("  " + l for l in dec[-5:])
+        lines.append("")
+    if ns:
+        lines.append("Nudges:")
+        lines.extend("  - " + n for n in ns)
+        lines.append("")
+    if not live and not ns:
+        lines.append("Aktif gorev yok.")
+
+    if args.inject:
+        if not live and not ns:
+            return 0
+        lines.append("Karari aldigin anda yaz: trail log \"<karar>\" --why ... --dropped ...")
+        print("===BEGIN TRAIL===")
+        print("\n".join(lines).strip())
+        print("===END TRAIL===")
+    else:
+        print("\n".join(lines).strip())
+    return 0
+
+
+# --------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="trail", description="task ledger for repos")
+    p.add_argument("--version", action="version", version="trail " + VERSION)
+    sub = p.add_subparsers(dest="cmd")
+
+    sub.add_parser("init", help="bu repoda .trail/ iskeletini kur").set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("start", help="yeni gorev dosyasi")
+    s.add_argument("slug")
+    s.add_argument("level", nargs="?", help="T1 (varsayilan) veya T2")
+    s.add_argument("--title")
+    s.set_defaults(fn=cmd_start)
+
+    s = sub.add_parser("log", help="kutuge tek satir ekle")
+    s.add_argument("text")
+    s.add_argument("--why")
+    s.add_argument("--dropped")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_log)
+
+    s = sub.add_parser("handoff", help="## Status bolumunu degistir")
+    s.add_argument("text")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_handoff)
+
+    s = sub.add_parser("done", help="damit, kapat, arsivle")
+    s.add_argument("--task")
+    s.add_argument("--no-edit", action="store_true")
+    s.set_defaults(fn=cmd_done)
+
+    s = sub.add_parser("ls", help="gorev listesi")
+    s.add_argument("--status", choices=STATUSES)
+    s.add_argument("--level")
+    s.add_argument("--stale", type=int, metavar="N")
+    s.add_argument("--all", action="store_true", help="arsivi de goster")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_ls)
+
+    s = sub.add_parser("board", help="terminal kanban")
+    s.add_argument("--all", action="store_true")
+    s.set_defaults(fn=cmd_board)
+
+    s = sub.add_parser("show", help="tek gorev")
+    s.add_argument("task", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("status", help="aktif gorevler + durtmeler")
+    s.add_argument("--inject", action="store_true", help="sinirlayicili blok halinde")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_status)
+    return p
+
+
+def main(argv=None) -> int:
+    if os.environ.get("TRAIL_DISABLED") == "1":
+        return 0
+    args = build_parser().parse_args(argv)
+    if not getattr(args, "fn", None):
+        build_parser().print_help()
+        return 1
+    try:
+        return args.fn(args)
+    except TrailError as e:
+        print("trail: %s" % e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
