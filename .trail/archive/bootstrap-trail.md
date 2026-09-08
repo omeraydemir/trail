@@ -2,7 +2,7 @@
 id: bootstrap-trail
 title: trail'i kendi üstünde kullan
 level: T1
-status: active
+status: done
 started: 2026-09-09
 links: []
 ---
