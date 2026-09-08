@@ -25,7 +25,9 @@ lossy end-of-session reconstruction.
 | T1 | 2-3 sessions, one topic | task file + close |
 | T2 | multi-day, architectural | + `## Plan` + handoff each session |
 
-T0 must stay free. A process system dies from taxing trivial work.
+T0 must stay free. A process system dies from taxing trivial work. The one
+exception is planning from a document: there every item gets a file, T0
+included, because the source text may exist nowhere else.
 
 ## Install
 
@@ -46,16 +48,22 @@ This creates `.trail/`, `DECISIONS.md`, and a `SKILL.md` for whichever agents th
 repo already uses. Agents disagree about where project skills live — Claude Code
 reads `.claude/skills/`, while Codex, Cursor and Gemini CLI read `.agents/skills/` —
 so `init` detects the marker directories present and writes to the right ones.
+
+`trail init --decisions docs/DECISIONS.md` puts the ledger somewhere else; the path
+lands in `.trail/config.yml`, and re-running `init` respects it. `init` never
+overwrites what is already there — `--force` refreshes a drifted `SKILL.md`, and
+leaves your `config.yml` and `_template.md` alone.
 Force it with `trail init --agent claude|codex|cursor|gemini|all`.
 
 ## Use
 
 ```bash
-trail start deeplink-handling T1        # new task
+trail start deeplink-handling T1        # new task (--status open parks it for later)
 trail log "route via AppLinks" \
      --why "Universal Links needs an AASA host we don't control" \
      --dropped "Universal Links"        # write it the moment you decide
 trail handoff "parser done, wiring the receiver next"
+trail set blocked                       # open | active | blocked (kapatmak: trail done)
 trail status                            # what am I doing, what went stale
 trail ls --stale 7                      # untouched for a week
 trail board                             # terminal kanban

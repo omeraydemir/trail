@@ -62,7 +62,7 @@ def test_own_skill_copy_is_in_sync():
     dest = HERE / ".claude" / "skills" / "trail" / "SKILL.md"
     if dest.exists():
         assert src.read_text("utf-8") == dest.read_text("utf-8"), \
-            "SKILL.md kopyalari ayrismis: 'trail init' ile tazele"
+            "SKILL.md kopyalari ayrismis: 'trail init --force' ile tazele"
 
 
 def run(cwd, *args, **kw):
@@ -82,6 +82,35 @@ def test_end_to_end():
         # no agent markers in a bare repo -> claude is the fallback
         assert (tmp / ".claude/skills/trail/SKILL.md").is_file()
         assert not (tmp / ".agents").exists()
+
+        # DECISIONS.md is configurable at init and re-init respects it
+        tmp2 = Path(tempfile.mkdtemp())
+        try:
+            subprocess.run(["git", "init", "-q"], cwd=str(tmp2), check=True)
+            run(tmp2, "init", "--decisions", "docs/DECISIONS.md")
+            assert (tmp2 / "docs/DECISIONS.md").is_file()
+            assert not (tmp2 / "DECISIONS.md").exists()
+            run(tmp2, "init")  # must not plant a second ledger at the root
+            assert not (tmp2 / "DECISIONS.md").exists()
+            run(tmp2, "start", "x")
+            run(tmp2, "log", "keep me")
+            run(tmp2, "done", "--no-edit")
+            assert "keep me" in (tmp2 / "docs/DECISIONS.md").read_text("utf-8")
+            # a hand-edited config.yml is user content: no drift warning, no clobber
+            conf = tmp2 / ".trail/config.yml"
+            conf.write_text(conf.read_text("utf-8") + "stale_days: 3\n", "utf-8")
+            assert "farkli" not in run(tmp2, "init", "--force")
+            assert "stale_days: 3" in conf.read_text("utf-8")
+        finally:
+            shutil.rmtree(tmp2, ignore_errors=True)
+
+        # init never clobbers a drifted copy; it warns, and --force refreshes
+        skill = tmp / ".claude/skills/trail/SKILL.md"
+        skill.write_text("stale\n", "utf-8")
+        assert "farkli" in run(tmp, "init")
+        assert skill.read_text("utf-8") == "stale\n"
+        run(tmp, "init", "--force")
+        assert skill.read_text("utf-8").startswith("---")
 
         # an existing .codex marker routes the skill to the shared .agents path
         (tmp / ".codex").mkdir()
@@ -124,6 +153,22 @@ def test_end_to_end():
 
         env = dict(os.environ, TRAIL_DISABLED="1")
         assert run(tmp, "log", "x", env=env) == ""
+
+        # bulk planning parks tasks as open so `trail status` stays meaningful,
+        # and T0 items still get a file - a plan that drops them loses the source text
+        run(tmp, "start", "planned-item", "T0", "--status", "open")
+        f2 = tmp / ".trail/tasks/planned-item.md"
+        fm2 = t.parse_fm(f2.read_text("utf-8"))
+        assert fm2["status"] == "open" and fm2["level"] == "T0", fm2
+        run(tmp, "log", "x", code=1)  # open != active, still no target
+
+        # `set` is the only way out of open/blocked
+        run(tmp, "set", "blocked", "--task", "planned-item")
+        assert t.parse_fm(f2.read_text("utf-8"))["status"] == "blocked"
+        run(tmp, "set", "active", "--task", "planned-item")
+        run(tmp, "log", "now resolvable")  # single active task -> no --task needed
+        assert "now resolvable" in f2.read_text("utf-8")
+        run(tmp, "set", "done", "--task", "planned-item", code=2)  # closing is `trail done`
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -282,11 +282,24 @@ def nudges(root: Path, cfg: dict, tasks: list) -> list:
 # commands
 # --------------------------------------------------------------------------
 
+def set_config_key(path: Path, key: str, value: str) -> None:
+    """Rewrite one `key: value` line in config.yml, keeping comments and order."""
+    lines = path.read_text("utf-8").splitlines()
+    for i, ln in enumerate(lines):
+        m = _KEY_RE.match(ln)
+        if m and m.group(1) == key:
+            comment = ln.split("#", 1)
+            lines[i] = "%s: %s%s" % (key, value, "  #" + comment[1] if len(comment) > 1 else "")
+            break
+    else:
+        lines.append("%s: %s" % (key, value))
+    path.write_text("\n".join(lines) + "\n", "utf-8")
+
+
 def cmd_init(args) -> int:
     root = Path.cwd().resolve()
     if (root / ".git").exists() is False:
         print("uyari: burasi bir git deposu degil gibi gorunuyor", file=sys.stderr)
-    cfg = dict(DEFAULTS)
     made = []
 
     for sub in ("tasks", "archive"):
@@ -296,14 +309,29 @@ def cmd_init(args) -> int:
         if not keep.exists():
             keep.write_text("", "utf-8")
 
-    def copy(src: Path, dst: Path):
+    stale = []
+
+    def copy(src: Path, dst: Path, shipped: bool = False):
         if dst.exists():
+            # Only SKILL.md is shipped content; config.yml and _template.md are
+            # meant to be edited, so drift there is the point, not a problem.
+            if shipped and src.read_bytes() != dst.read_bytes():
+                if args.force:
+                    shutil.copyfile(src, dst)
+                    made.append(str(dst.relative_to(root)) + " (tazelendi)")
+                else:
+                    stale.append(str(dst.relative_to(root)))
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
         made.append(str(dst.relative_to(root)))
 
-    copy(INSTALL_ROOT / "templates" / "config.yml", root / ".trail" / "config.yml")
+    conf = root / ".trail" / "config.yml"
+    copy(INSTALL_ROOT / "templates" / "config.yml", conf)
+    if args.decisions:
+        set_config_key(conf, "decisions", args.decisions)
+    # read it back: a repo that moved DECISIONS.md must not get a second one at root
+    cfg = load_config(root)
     copy(INSTALL_ROOT / "templates" / "_template.md", root / ".trail" / "_template.md")
     agents = args.agent or [a for a, m in AGENT_MARKERS.items() if (root / m).is_dir()]
     if "all" in agents:
@@ -312,10 +340,11 @@ def cmd_init(args) -> int:
         agents = ["claude"]
     src = INSTALL_ROOT / "skills" / "trail" / "SKILL.md"
     for dest in sorted({AGENT_SKILL_PATHS[a] for a in agents}):
-        copy(src, root / dest)
+        copy(src, root / dest, shipped=True)
 
     dec = root / cfg["decisions"]
     if not dec.exists():
+        dec.parent.mkdir(parents=True, exist_ok=True)
         dec.write_text("# Decisions\n\nDistilled from task decision logs at `trail done`.\n", "utf-8")
         made.append(cfg["decisions"])
 
@@ -324,6 +353,8 @@ def cmd_init(args) -> int:
         print("  + %s" % m)
     if not made:
         print("  (her sey zaten yerinde)")
+    for s in stale:
+        print("  ! %s kurulu surumden farkli - 'trail init --force' uzerine yazar" % s)
     print("\nsonraki: trail start <slug> [T1|T2]")
     print("not: .trail/ varsayilan olarak commit'lenir. Istemiyorsan .gitignore'a ekle.")
     return 0
@@ -350,14 +381,14 @@ def cmd_start(args) -> int:
         raise TrailError("zaten var: %s" % dest.relative_to(root))
 
     level = (args.level or "T1").upper()
-    if level not in ("T1", "T2"):
-        raise TrailError("seviye T1 ya da T2 olmali (T0 dosya gerektirmez)")
+    if level not in ("T0", "T1", "T2"):
+        raise TrailError("seviye T0, T1 ya da T2 olmali")
 
     values = {
         "id": slug,
         "title": args.title or slug,
         "level": level,
-        "status": "active",
+        "status": args.status,
         "date": date.today().isoformat(),
     }
     text = tpl.read_text("utf-8")
@@ -370,6 +401,18 @@ def cmd_start(args) -> int:
     print("olusturuldu: %s" % dest.relative_to(root))
     if level == "T2":
         print("T2: dosyaya '## Plan' basligini ekle.")
+    return 0
+
+
+def cmd_set(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg), args.task)
+    if task["status"] == args.status:
+        print("%s zaten %s" % (task["id"], args.status))
+        return 0
+    task["path"].write_text(set_field(task["text"], "status", args.status), "utf-8")
+    print("%s: %s -> %s" % (task["id"], task["status"], args.status))
     return 0
 
 
@@ -562,6 +605,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("init", help="bu repoda .trail/ iskeletini kur")
+    s.add_argument("--decisions", metavar="PATH",
+                   help="DECISIONS.md yolu, repo kokune gore (orn: docs/DECISIONS.md)")
+    s.add_argument("--force", action="store_true",
+                   help="farklilasmis SKILL.md/sablon dosyalarinin uzerine yaz")
     s.add_argument("--agent", action="append",
                    choices=sorted(AGENT_SKILL_PATHS) + ["all"],
                    help="SKILL.md nereye yazilsin (varsayilan: repoda bulunanlari algila)")
@@ -569,9 +616,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("start", help="yeni gorev dosyasi")
     s.add_argument("slug")
-    s.add_argument("level", nargs="?", help="T1 (varsayilan) veya T2")
+    s.add_argument("level", nargs="?", help="T0, T1 (varsayilan) veya T2")
     s.add_argument("--title")
+    s.add_argument("--status", choices=["open", "active", "blocked"], default="active",
+                   help="toplu planlamada 'open' kullan; varsayilan active")
     s.set_defaults(fn=cmd_start)
+
+    s = sub.add_parser("set", help="durum degistir (kapatmak icin 'trail done')")
+    s.add_argument("status", choices=["open", "active", "blocked"])
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_set)
 
     s = sub.add_parser("log", help="kutuge tek satir ekle")
     s.add_argument("text")

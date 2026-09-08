@@ -54,7 +54,8 @@ else is free — add fields to `_template.md` and nothing breaks.
 
 - `status` is one of `open` · `active` · `blocked` · `done`. The set is closed:
   board columns derive from it.
-- `level` is `T1` or `T2`. T0 tasks have no file at all.
+- `level` is `T0`, `T1` or `T2`. T0 work asked for in conversation gets no file;
+  a T0 item that came out of planning a document does, so the text is not lost.
 - `links` is a flat list of repo paths, optionally `path:line`. Not validated.
 
 ### Decision log line
