@@ -1,0 +1,7 @@
+# .trail/config.yml — every key is optional; the values shown are the defaults.
+
+dir: .trail/tasks        # active task files
+archive: .trail/archive  # closed tasks; moved, never deleted
+decisions: DECISIONS.md  # distillation target; outside .trail/, at repo root
+template: .trail/_template.md
+stale_days: 7            # a task untouched this long counts as stale
