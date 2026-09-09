@@ -52,8 +52,8 @@ Then, in any repo:
 trail init
 ```
 
-This creates `.trail/`, `DECISIONS.md`, and a `SKILL.md` for whichever agents the
-repo already uses. Agents disagree about where project skills live — Claude Code
+This creates `.trail/` (including an empty `backlog.md`), `DECISIONS.md`, and a
+`SKILL.md` for whichever agents the repo already uses. Agents disagree about where project skills live — Claude Code
 reads `.claude/skills/`, while Codex, Cursor and Gemini CLI read `.agents/skills/` —
 so `init` detects the marker directories present and writes to the right ones.
 
@@ -73,7 +73,7 @@ trail log "route via AppLinks" \
      --why "Universal Links needs an AASA host we don't control" \
      --dropped "Universal Links"        # write it the moment you decide
 trail handoff "parser done, wiring the receiver next"
-trail set status blocked                # status | level | title | after
+trail set status blocked                # status | level | title
 printf 'one sentence\n' | trail write goal   # prose sections come from stdin
 trail status                            # what am I doing, what went stale
 trail ls --stale 7                      # untouched for a week
@@ -81,7 +81,7 @@ trail board                             # terminal kanban
 trail done                              # distill into DECISIONS.md, archive
 ```
 
-Every read command takes `--json`.
+`trail ls`, `trail show` and `trail status` take `--json`.
 
 `trail done` appends the raw log to `DECISIONS.md` and hands it to you to trim.
 The distillation is deliberately not automatic — it is the one place where being
@@ -114,6 +114,7 @@ tasks is stale within the hour.
 .trail/
   config.yml          optional
   _template.md        yours to edit
+  backlog.md          deferred small work — a flat list, no lifecycle
   tasks/<slug>.md     scaffolding — dies with the task
   archive/<slug>.md
 DECISIONS.md          permanent, versioned with the code
@@ -135,6 +136,7 @@ See [spec/FORMAT.md](spec/FORMAT.md) for the full format contract.
 `.trail/config.yml` is optional; defaults apply when absent.
 
 ```yaml
+backlog: .trail/backlog.md
 dir: .trail/tasks
 archive: .trail/archive
 decisions: DECISIONS.md
@@ -143,7 +145,8 @@ stale_days: 7
 ```
 
 Custom frontmatter fields go in `_template.md`, not in config. The CLI reads only
-`id` `title` `level` `status`; everything else is yours and is preserved on write.
+`id` `title` `level` `status` `started` `links`; everything else is yours and is
+preserved on write.
 
 ## Nudges
 
@@ -152,6 +155,7 @@ have fired for the answer to be right.
 
 - task file untouched for `stale_days` → *still active? close it or continue*
 - code changed more recently than the task file → *you worked, you didn't log*
+- a scaffold file this repo predates is missing → *run `trail init`*
 
 Nudges only remind. Nothing is ever written automatically.
 
