@@ -2,7 +2,7 @@
 id: first-use-revisions
 title: first-use revisions
 level: T2
-status: active
+status: done
 started: 2026-09-09
 links:
   - spec/FORMAT.md
@@ -27,6 +27,7 @@ Hooks. The GUI. Translating the existing Turkish DECISIONS.md entry — rewritin
 - 2026-09-09 · links: kept and given a writer instead of being deleted · why: the missing part was the write path, not the field; it is the bridge to the reference document · dropped: deleting the field under the 'no field without a writer' rule
 - 2026-09-09 · init creates .trail/backlog.md instead of waiting for first use · why: a sink nobody can see is a sink nobody empties; init's job is to show the whole system · dropped: lazy creation on first 'trail backlog'
 - 2026-09-09 · init fills gaps in already-initialised repos; status nudges when the scaffold is behind · why: init is idempotent but nothing told the user to re-run it, so a new scaffold file stayed invisible in old repos — and this repeats on every future addition · dropped: a migration/upgrade command, and background scanning of repos
+- 2026-09-09 · README's '--json everywhere' claim narrowed to the three commands that have it · why: board and backlog are shaped for a terminal, and nothing consumes their JSON · dropped: adding --json to board and backlog to make the old sentence true
 
 ## Status
 Revisions done and verified: 7 tests on 3.12 and 3.9, smoke test clean. Nothing is committed — 6+ files on skill-planning-and-init-config, and main is two commits behind. Next: commit, fast-forward main, push.
