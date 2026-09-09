@@ -21,13 +21,21 @@ lossy end-of-session reconstruction.
 
 | Level | When | Ceremony |
 | --- | --- | --- |
-| T0 | single session, cheap to undo | **nothing** — no file, no command |
+| T0 | single session, cheap to undo | **nothing** — unless deferred, then one backlog line |
 | T1 | 2-3 sessions, one topic | task file + close |
 | T2 | multi-day, architectural | + `## Plan` + handoff each session |
 
-T0 must stay free. A process system dies from taxing trivial work. The one
-exception is planning from a document: there every item gets a file, T0
-included, because the source text may exist nowhere else.
+T0 must stay free. A process system dies from taxing trivial work, so small work
+you are actually doing leaves no trace at all. `trail backlog` is for the other
+case — small work you are *not* doing — and keeps it in the repo without giving it
+a status, a board card or a distillation step. Size decides whether there is a
+file; deferral decides whether there is a trace.
+
+Phases of one big task are not separate tasks unless they are worked separately.
+The test is whether phase 3 needs phase 1's decisions in your head; if it does,
+splitting only splits the context. Ordering between tasks that really are separate
+goes in the slug — `auth-1-provider`, `auth-2-session` — which `ls` sorts for
+free.
 
 ## Install
 
@@ -59,11 +67,14 @@ Force it with `trail init --agent claude|codex|cursor|gemini|all`.
 
 ```bash
 trail start deeplink-handling T1        # new task (--status open parks it for later)
+trail backlog "android smoke test"      # small items, no ceremony
+trail link docs/deeplink-design.md      # point the task at the design
 trail log "route via AppLinks" \
      --why "Universal Links needs an AASA host we don't control" \
      --dropped "Universal Links"        # write it the moment you decide
 trail handoff "parser done, wiring the receiver next"
-trail set blocked                       # open | active | blocked (kapatmak: trail done)
+trail set status blocked                # status | level | title | after
+printf 'one sentence\n' | trail write goal   # prose sections come from stdin
 trail status                            # what am I doing, what went stale
 trail ls --stale 7                      # untouched for a week
 trail board                             # terminal kanban
@@ -75,6 +86,27 @@ Every read command takes `--json`.
 `trail done` appends the raw log to `DECISIONS.md` and hands it to you to trim.
 The distillation is deliberately not automatic — it is the one place where being
 wrong is expensive.
+
+## One task or several
+
+The task file is injected into every session, so it holds only what you need in your
+head: goal, boundary, position, decisions. Anything you *consult* rather than
+remember — a design, a spec, a long plan — lives in its own document under `docs/`
+and is attached with `trail link`. Pouring a two-week design into `## Plan` breaks
+the file and pollutes every session with detail you are not using yet.
+
+When work has phases, the test for splitting is not size:
+
+> When you sit down to phase 3, do you need phase 1's status and decisions in your
+> head?
+
+**Yes** → one T2 task, phases as a checklist under `## Plan`. Ten phases still means
+one file — splitting it splits the context you were trying to carry. **No** →
+separate tasks, with order in the slug prefix: `auth-1-provider`, `auth-2-session`.
+Tasks sort by `(status, id)`, so the prefix orders them for free.
+
+There is no relation field and no index file. A hand-written cross-reference between
+tasks is stale within the hour.
 
 ## Layout
 

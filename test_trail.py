@@ -51,6 +51,19 @@ def test_sections():
     assert "- 2026-01-02 · y" in out  # replacing one section must not eat another
 
 
+def test_work_order_is_status_then_id_not_mtime():
+    """The file you touched last is not the work that comes first. Order between
+    related tasks lives in the slug prefix, so sorting by id is enough."""
+    def task(i, status="open"):
+        return {"id": i, "status": status}
+    ts = [task("auth-3-migration"), task("auth-1-provider"), task("auth-2-session")]
+    assert [x["id"] for x in sorted(ts, key=t.work_order(ts))] == [
+        "auth-1-provider", "auth-2-session", "auth-3-migration"]
+    # status still wins over the slug
+    ts = [task("a-1", status="blocked"), task("b-2")]
+    assert [x["id"] for x in sorted(ts, key=t.work_order(ts))] == ["b-2", "a-1"]
+
+
 def test_slugify():
     assert t.slugify("Push Notification  Deeplink!") == "push-notification-deeplink"
 
@@ -63,6 +76,19 @@ def test_own_skill_copy_is_in_sync():
     if dest.exists():
         assert src.read_text("utf-8") == dest.read_text("utf-8"), \
             "SKILL.md kopyalari ayrismis: 'trail init --force' ile tazele"
+
+
+def test_missing_scaffold_is_nudged_not_broken():
+    """A repo initialised by an older trail keeps working; status says what to run."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / ".trail" / "tasks").mkdir(parents=True)
+        cfg = t.load_config(tmp)
+        assert t.missing_scaffold(tmp, cfg) == [cfg["backlog"], cfg["decisions"]]
+        (tmp / cfg["backlog"]).write_text("# Backlog\n", "utf-8")
+        assert t.missing_scaffold(tmp, cfg) == [cfg["decisions"]]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def run(cwd, *args, **kw):
@@ -79,6 +105,8 @@ def test_end_to_end():
         run(tmp, "init")
         assert (tmp / ".trail/tasks").is_dir()
         assert (tmp / "DECISIONS.md").is_file()
+        # the sink must be visible before first use, or nobody knows to empty it
+        assert (tmp / ".trail/backlog.md").is_file()
         # no agent markers in a bare repo -> claude is the fallback
         assert (tmp / ".claude/skills/trail/SKILL.md").is_file()
         assert not (tmp / ".agents").exists()
@@ -99,7 +127,7 @@ def test_end_to_end():
             # a hand-edited config.yml is user content: no drift warning, no clobber
             conf = tmp2 / ".trail/config.yml"
             conf.write_text(conf.read_text("utf-8") + "stale_days: 3\n", "utf-8")
-            assert "farkli" not in run(tmp2, "init", "--force")
+            assert "differs" not in run(tmp2, "init", "--force")
             assert "stale_days: 3" in conf.read_text("utf-8")
         finally:
             shutil.rmtree(tmp2, ignore_errors=True)
@@ -107,7 +135,7 @@ def test_end_to_end():
         # init never clobbers a drifted copy; it warns, and --force refreshes
         skill = tmp / ".claude/skills/trail/SKILL.md"
         skill.write_text("stale\n", "utf-8")
-        assert "farkli" in run(tmp, "init")
+        assert "differs" in run(tmp, "init")
         assert skill.read_text("utf-8") == "stale\n"
         run(tmp, "init", "--force")
         assert skill.read_text("utf-8").startswith("---")
@@ -154,21 +182,51 @@ def test_end_to_end():
         env = dict(os.environ, TRAIL_DISABLED="1")
         assert run(tmp, "log", "x", env=env) == ""
 
-        # bulk planning parks tasks as open so `trail status` stays meaningful,
-        # and T0 items still get a file - a plan that drops them loses the source text
-        run(tmp, "start", "planned-item", "T0", "--status", "open")
+        # bulk planning parks tasks as open so `trail status` stays meaningful.
+        # T0 is refused a file on purpose; the message has to say where it goes.
+        r = subprocess.run([sys.executable, str(BIN), "start", "small", "T0"],
+                           cwd=str(tmp), capture_output=True, text=True)
+        assert r.returncode == 1 and "backlog" in r.stderr, r.stderr
+        run(tmp, "start", "planned-item", "--status", "open")
         f2 = tmp / ".trail/tasks/planned-item.md"
-        fm2 = t.parse_fm(f2.read_text("utf-8"))
-        assert fm2["status"] == "open" and fm2["level"] == "T0", fm2
+        assert t.parse_fm(f2.read_text("utf-8"))["status"] == "open"
         run(tmp, "log", "x", code=1)  # open != active, still no target
 
-        # `set` is the only way out of open/blocked
-        run(tmp, "set", "blocked", "--task", "planned-item")
+        # every frontmatter field has a writer; hand-editing is never required
+        run(tmp, "set", "status", "blocked", "--task", "planned-item")
         assert t.parse_fm(f2.read_text("utf-8"))["status"] == "blocked"
-        run(tmp, "set", "active", "--task", "planned-item")
+        run(tmp, "set", "level", "T2", "--task", "planned-item")
+        assert t.parse_fm(f2.read_text("utf-8"))["level"] == "T2"
+        run(tmp, "set", "status", "active", "--task", "planned-item")
         run(tmp, "log", "now resolvable")  # single active task -> no --task needed
         assert "now resolvable" in f2.read_text("utf-8")
-        run(tmp, "set", "done", "--task", "planned-item", code=2)  # closing is `trail done`
+        run(tmp, "set", "status", "done", "--task", "planned-item", code=1)  # use `trail done`
+        # links: the field the spec documents, with the writer it was missing
+        run(tmp, "link", "docs/plan.md", "src/A.cs:12", "--task", "planned-item")
+        assert t.parse_fm(f2.read_text("utf-8"))["links"] == ["docs/plan.md", "src/A.cs:12"]
+        run(tmp, "link", "docs/plan.md", "--task", "planned-item")  # idempotent
+        assert t.parse_fm(f2.read_text("utf-8"))["links"] == ["docs/plan.md", "src/A.cs:12"]
+
+        # backlog is a sink: a line, no lifecycle, and status shows only the count
+        run(tmp, "backlog", "android smoke", "ask backend 3 questions")
+        assert (tmp / ".trail/backlog.md").read_text("utf-8").count("\n- ") == 2
+        assert "backlog: 2 items" in run(tmp, "status")
+
+        # write replaces a section, and creates one the template lacks
+        f2.write_text(f2.read_text("utf-8"), "utf-8")
+        r = subprocess.run([sys.executable, str(BIN), "write", "goal", "--task", "planned-item"],
+                           cwd=str(tmp), input="tek cumle\n", capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert t.get_section(f2.read_text("utf-8"), "Goal") == "tek cumle"
+        r = subprocess.run([sys.executable, str(BIN), "write", "plan", "--task", "planned-item"],
+                           cwd=str(tmp), input="adim 1\nadim 2\n", capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert t.get_section(f2.read_text("utf-8"), "Plan") == "adim 1\nadim 2"
+        # an empty body is a mistake, not an erasure
+        r = subprocess.run([sys.executable, str(BIN), "write", "goal", "--task", "planned-item"],
+                           cwd=str(tmp), input="  \n", capture_output=True, text=True)
+        assert r.returncode == 1
+        assert t.get_section(f2.read_text("utf-8"), "Goal") == "tek cumle"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

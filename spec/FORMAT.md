@@ -9,6 +9,7 @@ is the product.
 .trail/
   config.yml          optional; defaults apply when absent
   _template.md        task template, user-editable
+  backlog.md          small items; a flat list, no frontmatter, no lifecycle
   tasks/<slug>.md     active tasks — scaffolding, dies with the task
   archive/<slug>.md   closed tasks; moved, never deleted
 DECISIONS.md          distilled decisions — permanent, versioned with the code
@@ -54,9 +55,15 @@ else is free — add fields to `_template.md` and nothing breaks.
 
 - `status` is one of `open` · `active` · `blocked` · `done`. The set is closed:
   board columns derive from it.
-- `level` is `T0`, `T1` or `T2`. T0 work asked for in conversation gets no file;
-  a T0 item that came out of planning a document does, so the text is not lost.
+- `level` is `T1` or `T2`. T0 has no task file and no representation anywhere:
+  small work being done now leaves no trace. `backlog.md` holds the other case,
+  small work that is deferred.
 - `links` is a flat list of repo paths, optionally `path:line`. Not validated.
+  It is how a task points at the design document or the code it concerns.
+
+There is no relation between tasks: no parent, no subtask, no dependency field.
+Ordering between related tasks lives in the slug (`auth-1-provider`,
+`auth-2-session`), which `ls` sorts for free.
 
 ### Decision log line
 
@@ -66,6 +73,46 @@ else is free — add fields to `_template.md` and nothing breaks.
 
 `why:` and `dropped:` are optional but `dropped:` is the reason the format exists.
 
+## What belongs in a task file
+
+The task file is injected into every session. That is the whole constraint, and the
+division falls out of it:
+
+| | Lives in | On session start |
+| --- | --- | --- |
+| What you must hold in your head each session — goal, boundary, position, decisions | the task file | injected |
+| What you consult when you reach that part — designs, specs, long plans | a reference document | linked, not injected |
+
+`links:` is that bridge. A two-week design poured into `## Plan` breaks both halves:
+the file stops answering "where am I", and the detail is re-injected every session.
+
+A reference document lives under the repo's own docs convention, never inside
+`.trail/` — same reason `DECISIONS.md` sits outside it: a different lifetime. trail
+links such a document; it does not own it.
+
+Drift between the two is not a real risk, because they do not overlap: the document
+holds the design and changes rarely, the task file holds the position and changes
+constantly. A design change is one `trail log` line (why) plus a document edit (what
+it now is).
+
+## Splitting work across task files
+
+The test is not size and not phase count:
+
+> When you sit down to phase 3, do you need phase 1's status and decisions in your
+> head?
+
+- **Yes** → one T2 task, phases as a checklist under `## Plan`. Ten phases still
+  means one file: splitting it splits the context you were trying to carry.
+- **No** → separate tasks.
+
+When you do split, order and grouping go in the **slug prefix**, not in a field:
+`auth-1-provider`, `auth-2-session`, `auth-3-migration`. Tasks sort by `(status, id)`,
+so the prefix carries the order for free.
+
+There is deliberately no relation field (`after:`, parent, subtask) and no index file
+pointing at children: a hand-written cross-reference goes stale within the hour.
+
 ## Template placeholders
 
 `trail start` substitutes `{{id}}` `{{title}}` `{{level}}` `{{status}}` `{{date}}`.
@@ -73,7 +120,7 @@ else is free — add fields to `_template.md` and nothing breaks.
 
 ## Config
 
-Flat YAML. Keys: `dir` `archive` `decisions` `template` `stale_days`. Unknown keys
+Flat YAML. Keys: `backlog` `dir` `archive` `decisions` `template` `stale_days`. Unknown keys
 are ignored.
 
 ## Parsing rules
@@ -99,3 +146,15 @@ Nudges only remind. Nothing is written automatically.
 
 `TRAIL_DISABLED=1` makes every command a no-op, so a one-off session in someone
 else's repo is never hijacked.
+
+## Backlog
+
+`backlog.md` holds deferred small work — never work in progress, never work that
+is finished. It is a sink, not a tracker: a flat markdown list, no frontmatter, no
+status, no ids. Nothing distills it, nothing nudges about it, and no command
+operates on a single item — promotion is `trail start` plus deleting the line by
+hand. `trail status` reports the item count and never the contents; injecting them
+would turn the file into a graveyard that rots in every prompt.
+
+Growth is expected; the failure signal is the opposite. Backlog lines describing
+work that was already done mean the boundary leaked and T0 started paying a tax.

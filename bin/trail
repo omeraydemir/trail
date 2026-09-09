@@ -18,6 +18,12 @@ from pathlib import Path
 
 VERSION = "0.1.0"
 STATUSES = ["open", "active", "blocked", "done"]
+# prose sections a human or an agent may rewrite; the decision log is not one
+# of them - it only ever grows, through `trail log`.
+SECTIONS = {
+    "goal": "Goal", "scope": "Out of Scope", "out-of-scope": "Out of Scope",
+    "plan": "Plan", "questions": "Open Questions",
+}
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 # Where each agent reads project skills from. Claude Code does NOT read
@@ -35,7 +41,13 @@ AGENT_MARKERS = {
     "gemini": ".gemini",
 }
 
+BACKLOG_HEADER = (
+    "# Backlog\n\nSmall items, no ceremony. Promote with `trail start <slug>` "
+    "and delete the line.\n\n"
+)
+
 DEFAULTS = {
+    "backlog": ".trail/backlog.md",
     "dir": ".trail/tasks",
     "archive": ".trail/archive",
     "decisions": "DECISIONS.md",
@@ -52,7 +64,7 @@ class TrailError(Exception):
 # tiny YAML subset - serves both config.yml and task frontmatter
 # Supports: `key: scalar`, `key:` / `key: []` followed by `- item` lines,
 # and `# comments`. A key with no value is read as an empty list; the only
-# list in the schema is `links`, so that ambiguity costs nothing.
+# schema has no list keys left, so that ambiguity costs nothing.
 # --------------------------------------------------------------------------
 
 _KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$")
@@ -112,7 +124,7 @@ def set_field(text: str, key: str, value) -> str:
     """Replace one frontmatter value in place. Everything else is untouched."""
     b = fm_bounds(text)
     if not b:
-        raise TrailError("dosyada frontmatter yok")
+        raise TrailError("file has no frontmatter")
     start, end = b
     block = text[start:end]
     pat = re.compile(r"^(" + re.escape(key) + r":)([^\n]*)$", re.M)
@@ -120,6 +132,21 @@ def set_field(text: str, key: str, value) -> str:
         block = pat.sub(lambda m: "%s %s" % (m.group(1), value), block, count=1)
     else:
         block = block + "%s: %s\n" % (key, value)
+    return text[:start] + block + text[end:]
+
+
+def set_list_field(text: str, key: str, items) -> str:
+    """Replace a list-valued frontmatter key. Same surgical contract as
+    set_field: nothing else in the block is reserialized."""
+    b = fm_bounds(text)
+    if not b:
+        raise TrailError("file has no frontmatter")
+    start, end = b
+    block = text[start:end]
+    rendered = ("%s: []\n" % key) if not items else (
+        "%s:\n" % key + "".join("  - %s\n" % i for i in items))
+    pat = re.compile(r"^" + re.escape(key) + r":[^\n]*\n(?:[ \t]*-[^\n]*\n)*", re.M)
+    block = pat.sub(rendered, block, count=1) if pat.search(block) else block + rendered
     return text[:start] + block + text[end:]
 
 
@@ -146,10 +173,12 @@ def get_section(text: str, heading: str) -> str:
     return "\n".join(keep).strip()
 
 
-def set_section(text: str, heading: str, body: str) -> str:
+def set_section(text: str, heading: str, body: str, create: bool = False) -> str:
     b = section_bounds(text, heading)
     if not b:
-        raise TrailError("'## %s' bolumu yok" % heading)
+        if not create:
+            raise TrailError("no '## %s' section" % heading)
+        return text.rstrip() + "\n\n## %s\n%s\n" % (heading, body.rstrip())
     return text[:b[0]] + body.rstrip() + "\n\n" + text[b[1]:]
 
 
@@ -224,19 +253,27 @@ def load_tasks(root: Path, cfg: dict, archived: bool = False) -> list:
     return out
 
 
+def work_order(tasks: list):
+    """Sort key: status, then id. Never mtime - the file you touched last is not
+    the work that comes first. Ordering between related tasks belongs in the slug
+    (`auth-1-provider`, `auth-2-session`), so `id` carries it for free."""
+    order = {s: i for i, s in enumerate(STATUSES)}
+    return lambda t: (order.get(t["status"], 9), t["id"])
+
+
 def resolve_task(tasks: list, ident: str = None) -> dict:
     if ident:
         for t in tasks:
             if t["id"] == ident or t["path"].stem == ident:
                 return t
-        raise TrailError("gorev bulunamadi: %s" % ident)
+        raise TrailError("no such task: %s" % ident)
     active = [t for t in tasks if t["status"] == "active"]
     if len(active) == 1:
         return active[0]
     if not active:
-        raise TrailError("aktif gorev yok. 'trail start <slug>' ya da --task ver.")
+        raise TrailError("no active task. Run 'trail start <slug>' or pass --task.")
     ids = ", ".join(t["id"] for t in active)
-    raise TrailError("birden fazla aktif gorev var, --task ver: %s" % ids)
+    raise TrailError("more than one active task, pass --task: %s" % ids)
 
 
 # --------------------------------------------------------------------------
@@ -265,6 +302,13 @@ def code_newer_than(root: Path, ts: float) -> bool:
     return False
 
 
+def missing_scaffold(root: Path, cfg: dict) -> list:
+    """Files `init` would create that this repo does not have. A repo initialised by
+    an older trail is not broken - both files are also created lazily on first write -
+    but the feature stays invisible until someone re-runs init."""
+    return [cfg[k] for k in ("backlog", "decisions") if not (root / cfg[k]).exists()]
+
+
 def nudges(root: Path, cfg: dict, tasks: list) -> list:
     out = []
     for t in tasks:
@@ -272,9 +316,9 @@ def nudges(root: Path, cfg: dict, tasks: list) -> list:
             continue
         age = age_days(t["mtime"])
         if age >= cfg["stale_days"]:
-            out.append("%s: %s gundur dokunulmadi. Hala aktif mi? Kapat ya da devam et." % (t["id"], age))
+            out.append("%s: untouched for %s days. Still active? Close it or carry on." % (t["id"], age))
         elif code_newer_than(root, t["mtime"]):
-            out.append("%s: kod degisti ama kutuk durgun. Karar aldiysan 'trail log' ile yaz." % t["id"])
+            out.append("%s: code moved, log did not. Write the decision with 'trail log'." % t["id"])
     return out
 
 
@@ -299,7 +343,7 @@ def set_config_key(path: Path, key: str, value: str) -> None:
 def cmd_init(args) -> int:
     root = Path.cwd().resolve()
     if (root / ".git").exists() is False:
-        print("uyari: burasi bir git deposu degil gibi gorunuyor", file=sys.stderr)
+        print("warning: this does not look like a git repository", file=sys.stderr)
     made = []
 
     for sub in ("tasks", "archive"):
@@ -318,7 +362,7 @@ def cmd_init(args) -> int:
             if shipped and src.read_bytes() != dst.read_bytes():
                 if args.force:
                     shutil.copyfile(src, dst)
-                    made.append(str(dst.relative_to(root)) + " (tazelendi)")
+                    made.append(str(dst.relative_to(root)) + " (refreshed)")
                 else:
                     stale.append(str(dst.relative_to(root)))
             return
@@ -342,21 +386,27 @@ def cmd_init(args) -> int:
     for dest in sorted({AGENT_SKILL_PATHS[a] for a in agents}):
         copy(src, root / dest, shipped=True)
 
+    bl = root / cfg["backlog"]
+    if not bl.exists():
+        bl.parent.mkdir(parents=True, exist_ok=True)
+        bl.write_text(BACKLOG_HEADER, "utf-8")
+        made.append(cfg["backlog"])
+
     dec = root / cfg["decisions"]
     if not dec.exists():
         dec.parent.mkdir(parents=True, exist_ok=True)
         dec.write_text("# Decisions\n\nDistilled from task decision logs at `trail done`.\n", "utf-8")
         made.append(cfg["decisions"])
 
-    print("hazir: %s" % root)
+    print("ready: %s" % root)
     for m in made:
         print("  + %s" % m)
     if not made:
-        print("  (her sey zaten yerinde)")
+        print("  (everything already in place)")
     for s in stale:
-        print("  ! %s kurulu surumden farkli - 'trail init --force' uzerine yazar" % s)
-    print("\nsonraki: trail start <slug> [T1|T2]")
-    print("not: .trail/ varsayilan olarak commit'lenir. Istemiyorsan .gitignore'a ekle.")
+        print("  ! %s differs from the installed copy - 'trail init --force' overwrites it" % s)
+    print("\nnext: trail start <slug> [T1|T2]")
+    print("note: .trail/ is committed by default. Add it to .gitignore if you'd rather not.")
     return 0
 
 
@@ -371,18 +421,22 @@ def cmd_start(args) -> int:
     cfg = load_config(root)
     tpl = root / cfg["template"]
     if not tpl.is_file():
-        raise TrailError("sablon yok: %s  ('trail init' calistirdin mi?)" % tpl)
+        raise TrailError("no template at %s  (did you run 'trail init'?)" % tpl)
 
     slug = slugify(args.slug)
     if not slug:
-        raise TrailError("gecersiz slug")
+        raise TrailError("invalid slug")
     dest = root / cfg["dir"] / (slug + ".md")
     if dest.exists():
-        raise TrailError("zaten var: %s" % dest.relative_to(root))
+        raise TrailError("already exists: %s" % dest.relative_to(root))
 
     level = (args.level or "T1").upper()
-    if level not in ("T0", "T1", "T2"):
-        raise TrailError("seviye T0, T1 ya da T2 olmali")
+    if level not in ("T1", "T2"):
+        raise TrailError(
+            "T0 has no task file. If you are doing it now, write nothing;\n"
+            "       if you are deferring it, 'trail backlog \"...\"' (%s);\n"
+            "       if it needs a status and a handoff, it is at least T1."
+            % cfg["backlog"])
 
     values = {
         "id": slug,
@@ -398,21 +452,100 @@ def cmd_start(args) -> int:
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(text, "utf-8")
-    print("olusturuldu: %s" % dest.relative_to(root))
+    print("created: %s" % dest.relative_to(root))
     if level == "T2":
-        print("T2: dosyaya '## Plan' basligini ekle.")
+        print("T2: add the '## Plan' section with 'trail write plan'.")
     return 0
+
+
+SETTABLE = {
+    "status": ["open", "active", "blocked"],   # closing is `trail done`
+    "level": ["T1", "T2"],
+    "title": None,
+}
 
 
 def cmd_set(args) -> int:
     root = find_root()
     cfg = load_config(root)
-    task = resolve_task(load_tasks(root, cfg), args.task)
-    if task["status"] == args.status:
-        print("%s zaten %s" % (task["id"], args.status))
+    tasks = load_tasks(root, cfg)
+    task = resolve_task(tasks, args.task)
+    allowed = SETTABLE[args.field]
+    value = args.value
+    if args.field in ("status", "level"):
+        value = value.lower() if args.field == "status" else value.upper()
+    if allowed and value not in allowed:
+        extra = " (to close, use 'trail done')" if args.field == "status" else ""
+        raise TrailError("%s must be one of: %s%s"
+                         % (args.field, ", ".join(allowed), extra))
+    old = task["fm"].get(args.field) or task.get(args.field) or "-"
+    task["path"].write_text(set_field(task["text"], args.field, value), "utf-8")
+    print("%s: %s %s -> %s" % (task["id"], args.field, old, value or "-"))
+    if args.field == "level" and value == "T2" and not section_bounds(task["text"], "Plan"):
+        print("T2: add the '## Plan' section with 'trail write plan'.")
+    return 0
+
+
+def cmd_backlog(args) -> int:
+    """A sink, not a tracker. No ids, no status, no lifecycle - the only thing it
+    guarantees is that an item the user mentioned still exists tomorrow."""
+    root = find_root()
+    cfg = load_config(root)
+    f = root / cfg["backlog"]
+    if not args.item:
+        if not f.is_file():
+            print("backlog is empty")
+            return 0
+        sys.stdout.write(f.read_text("utf-8"))
         return 0
-    task["path"].write_text(set_field(task["text"], "status", args.status), "utf-8")
-    print("%s: %s -> %s" % (task["id"], task["status"], args.status))
+    if not f.is_file():
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(BACKLOG_HEADER, "utf-8")
+    with f.open("a", encoding="utf-8") as fh:
+        for item in args.item:
+            fh.write("- %s\n" % item.strip())
+    print("%s: +%d" % (cfg["backlog"], len(args.item)))
+    return 0
+
+
+def backlog_count(root: Path, cfg: dict) -> int:
+    f = root / cfg["backlog"]
+    if not f.is_file():
+        return 0
+    return sum(1 for l in f.read_text("utf-8").splitlines() if l.strip().startswith("- "))
+
+
+def cmd_link(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg), args.task)
+    links = list(task["links"])
+    for path in args.path:
+        if path not in links:
+            links.append(path)
+    task["path"].write_text(set_list_field(task["text"], "links", links), "utf-8")
+    print("%s: links -> %s" % (task["id"], ", ".join(links)))
+    return 0
+
+
+def cmd_write(args) -> int:
+    """Replace a prose section from stdin. The alternative - an agent doing a
+    literal string replace on the template's comment - fails silently."""
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg), args.task)
+    body = sys.stdin.read().strip()
+    if not body:
+        raise TrailError("empty stdin: pipe the section body in")
+    canonical = {v.lower(): v for v in SECTIONS.values()}
+    key = args.section.strip().lower()
+    heading = SECTIONS.get(key) or canonical.get(key)
+    if not heading:
+        raise TrailError("section must be one of: %s" % ", ".join(sorted(set(SECTIONS.values()))))
+    text = set_section(task["text"], heading, body, create=True)
+    task["path"].write_text(text, "utf-8")
+    n = len(body.splitlines())
+    print("%s: ## %s written (%d line%s)" % (task["id"], heading, n, "" if n == 1 else "s"))
     return 0
 
 
@@ -438,7 +571,7 @@ def cmd_handoff(args) -> int:
     task = resolve_task(load_tasks(root, cfg), args.task)
     text = set_section(task["text"], "Status", args.text.strip())
     task["path"].write_text(text, "utf-8")
-    print("%s: ## Status guncellendi" % task["id"])
+    print("%s: ## Status updated" % task["id"])
     return 0
 
 
@@ -451,7 +584,7 @@ def cmd_done(args) -> int:
     dec = root / cfg["decisions"]
     header = "\n## %s\n\n_%s · %s · %s_\n\n" % (
         task["title"], date.today().isoformat(), task["level"], task["id"])
-    body = log if log else "_(kutuk bos)_"
+    body = log if log else "_(empty log)_"
     with dec.open("a", encoding="utf-8") as fh:
         fh.write(header + body + "\n")
 
@@ -462,13 +595,13 @@ def cmd_done(args) -> int:
     dest.write_text(text, "utf-8")
     task["path"].unlink()
 
-    print("kapandi: %s -> %s" % (task["id"], dest.relative_to(root)))
-    print("kutuk eklendi: %s" % cfg["decisions"])
+    print("closed: %s -> %s" % (task["id"], dest.relative_to(root)))
+    print("log appended to %s" % cfg["decisions"])
     editor = os.environ.get("EDITOR")
     if editor and sys.stdin.isatty() and not args.no_edit:
         subprocess.call([editor, str(dec)])
     else:
-        print("SIMDI DAMIT: %s icindeki son bolumu 3-5 satira indir." % cfg["decisions"])
+        print("DISTILL NOW: trim the last section of %s to 3-5 lines." % cfg["decisions"])
     return 0
 
 
@@ -500,10 +633,9 @@ def cmd_ls(args) -> int:
         print(json.dumps([_as_dict(t) for t in tasks], ensure_ascii=False, indent=2))
         return 0
     if not tasks:
-        print("gorev yok")
+        print("no tasks")
         return 0
-    order = {s: i for i, s in enumerate(STATUSES)}
-    tasks.sort(key=lambda t: (order.get(t["status"], 9), -t["mtime"]))
+    tasks.sort(key=work_order(tasks))
     w = max(len(t["id"]) for t in tasks)
     print("%-*s  %-4s  %-8s  %5s  %s" % (w, "ID", "LVL", "STATUS", "AGE", "TITLE"))
     for t in tasks:
@@ -516,6 +648,7 @@ def cmd_board(args) -> int:
     root = find_root()
     cfg = load_config(root)
     tasks = load_tasks(root, cfg, archived=args.all)
+    tasks.sort(key=work_order(tasks))
     cols = [(s, [t["id"] for t in tasks if t["status"] == s]) for s in STATUSES]
     width = 18
     head = "  ".join("%-*s" % (width, "%s (%d)" % (s, len(ids)))[:width] for s, ids in cols)
@@ -528,7 +661,7 @@ def cmd_board(args) -> int:
             row.append("%-*s" % (width, ids[i][:width] if i < len(ids) else ""))
         print("  ".join(row).rstrip())
     if depth == 0:
-        print("(bos)")
+        print("(empty)")
     return 0
 
 
@@ -553,11 +686,17 @@ def cmd_status(args) -> int:
     tasks = load_tasks(root, cfg)
     live = [t for t in tasks if t["status"] in ("active", "blocked")]
     ns = nudges(root, cfg, tasks)
+    gap = missing_scaffold(root, cfg)
+    if gap:
+        ns.append("this repo predates part of the scaffold (%s) - run 'trail init'"
+                  % ", ".join(gap))
+    n_backlog = backlog_count(root, cfg)
 
     if args.json:
         print(json.dumps({
             "root": str(root),
             "tasks": [_as_dict(t) for t in live],
+            "backlog_items": n_backlog,
             "nudges": ns,
         }, ensure_ascii=False, indent=2))
         return 0
@@ -578,17 +717,20 @@ def cmd_status(args) -> int:
             lines.append("Recent decisions:")
             lines.extend("  " + l for l in dec[-5:])
         lines.append("")
+    if n_backlog:
+        lines.append("backlog: %d items (trail backlog)" % n_backlog)
+        lines.append("")
     if ns:
         lines.append("Nudges:")
         lines.extend("  - " + n for n in ns)
         lines.append("")
-    if not live and not ns:
-        lines.append("Aktif gorev yok.")
+    if not live and not ns and not n_backlog:
+        lines.append("No active task.")
 
     if args.inject:
-        if not live and not ns:
+        if not live and not ns and not n_backlog:
             return 0
-        lines.append("Karari aldigin anda yaz: trail log \"<karar>\" --why ... --dropped ...")
+        lines.append("Write it the moment you decide: trail log \"<decision>\" --why ... --dropped ...")
         print("===BEGIN TRAIL===")
         print("\n".join(lines).strip())
         print("===END TRAIL===")
@@ -604,51 +746,66 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version="trail " + VERSION)
     sub = p.add_subparsers(dest="cmd")
 
-    s = sub.add_parser("init", help="bu repoda .trail/ iskeletini kur")
+    s = sub.add_parser("init", help="set up .trail/ in this repo")
     s.add_argument("--decisions", metavar="PATH",
-                   help="DECISIONS.md yolu, repo kokune gore (orn: docs/DECISIONS.md)")
+                   help="DECISIONS.md path, relative to the repo root (e.g. docs/DECISIONS.md)")
     s.add_argument("--force", action="store_true",
-                   help="farklilasmis SKILL.md/sablon dosyalarinin uzerine yaz")
+                   help="overwrite a SKILL.md that has drifted from the installed copy")
     s.add_argument("--agent", action="append",
                    choices=sorted(AGENT_SKILL_PATHS) + ["all"],
-                   help="SKILL.md nereye yazilsin (varsayilan: repoda bulunanlari algila)")
+                   help="where to write SKILL.md (default: detect the agents this repo uses)")
     s.set_defaults(fn=cmd_init)
 
-    s = sub.add_parser("start", help="yeni gorev dosyasi")
+    s = sub.add_parser("start", help="new task file")
     s.add_argument("slug")
-    s.add_argument("level", nargs="?", help="T0, T1 (varsayilan) veya T2")
+    s.add_argument("level", nargs="?", help="T1 (default) or T2; T0 has no file")
     s.add_argument("--title")
     s.add_argument("--status", choices=["open", "active", "blocked"], default="active",
-                   help="toplu planlamada 'open' kullan; varsayilan active")
+                   help="use 'open' when planning in bulk; default active")
     s.set_defaults(fn=cmd_start)
 
-    s = sub.add_parser("set", help="durum degistir (kapatmak icin 'trail done')")
-    s.add_argument("status", choices=["open", "active", "blocked"])
+    s = sub.add_parser("set", help="change a frontmatter field")
+    s.add_argument("field", choices=sorted(SETTABLE))
+    s.add_argument("value")
     s.add_argument("--task")
     s.set_defaults(fn=cmd_set)
 
-    s = sub.add_parser("log", help="kutuge tek satir ekle")
+    s = sub.add_parser("backlog", help="small items; no args prints the list")
+    s.add_argument("item", nargs="*")
+    s.set_defaults(fn=cmd_backlog)
+
+    s = sub.add_parser("link", help="attach a repo path (code or doc) to a task")
+    s.add_argument("path", nargs="+")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_link)
+
+    s = sub.add_parser("write", help="write a prose section from stdin")
+    s.add_argument("section", help=", ".join(sorted(SECTIONS)))
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_write)
+
+    s = sub.add_parser("log", help="append one line to the decision log")
     s.add_argument("text")
     s.add_argument("--why")
     s.add_argument("--dropped")
     s.add_argument("--task")
     s.set_defaults(fn=cmd_log)
 
-    s = sub.add_parser("handoff", help="## Status bolumunu degistir")
+    s = sub.add_parser("handoff", help="rewrite the ## Status section")
     s.add_argument("text")
     s.add_argument("--task")
     s.set_defaults(fn=cmd_handoff)
 
-    s = sub.add_parser("done", help="damit, kapat, arsivle")
+    s = sub.add_parser("done", help="distill, close, archive")
     s.add_argument("--task")
     s.add_argument("--no-edit", action="store_true")
     s.set_defaults(fn=cmd_done)
 
-    s = sub.add_parser("ls", help="gorev listesi")
+    s = sub.add_parser("ls", help="task list")
     s.add_argument("--status", choices=STATUSES)
     s.add_argument("--level")
     s.add_argument("--stale", type=int, metavar="N")
-    s.add_argument("--all", action="store_true", help="arsivi de goster")
+    s.add_argument("--all", action="store_true", help="include the archive")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_ls)
 
@@ -656,13 +813,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_board)
 
-    s = sub.add_parser("show", help="tek gorev")
+    s = sub.add_parser("show", help="one task in full")
     s.add_argument("task", nargs="?")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_show)
 
-    s = sub.add_parser("status", help="aktif gorevler + durtmeler")
-    s.add_argument("--inject", action="store_true", help="sinirlayicili blok halinde")
+    s = sub.add_parser("status", help="active tasks + nudges")
+    s.add_argument("--inject", action="store_true", help="wrap in delimiters for context injection")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
     return p
