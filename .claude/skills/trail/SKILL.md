@@ -46,7 +46,7 @@ dates things, it never leaves a section half-written, it keeps `level:` honest.
 | `status`, `level`, `title`, `group` | `trail set <field> <value>` |
 | a new task | `trail start <slug> [T1\|T2] [--status open] [--group <g>]` |
 | a small item you are deferring | `trail backlog "<item>"` — tagged `#<active task>` |
-| closing | `trail done` — appends the raw log to `DECISIONS.md`, marks the file done |
+| closing | `trail done` — marks the task done and reports the backlog around it |
 
 **When the CLI cannot say what you mean, edit the file.** Tick a checkbox, fix a
 line, add a heading the format does not have. The one obligation is not breaking
@@ -86,8 +86,12 @@ answers it.
    is that using it does not tax the 80% of work that is small — T0 acquiring any
    obligation breaks it. What goes to `trail backlog` is small work you are *not*
    doing: deferred, not finished.
-4. **Never distill into `DECISIONS.md` yourself.** `trail done` appends the raw log
-   and the human trims it. Getting this wrong is expensive.
+4. **One task, not the repo.** The decision log carries a task's reasoning across
+   the sessions that task takes. trail does **not** manage a repo-lifetime decision
+   record: there is no `DECISIONS.md`, no distillation, and `done` files nothing
+   anywhere. If something looks bigger than the task — a dependency added, an
+   invariant someone will break later — **say so and offer**; whether it earns a
+   permanent document under `docs/` is the user's call, and they will ask.
 5. **Never summarize the session.** `trail handoff` rewrites `## Status`: where you
    stopped, what is next. The reasoning is already in the log.
 6. **Tick the box when it is true.** `## Plan` items are checkboxes: `[ ]` not

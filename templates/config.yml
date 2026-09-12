@@ -1,6 +1,5 @@
 # .trail/config.yml — every key is optional; the values shown are the defaults.
 
 dir: .trail/tasks        # every task, open through done
-decisions: DECISIONS.md  # distillation target, path relative to the repo root
 template: .trail/_template.md
 stale_days: 7            # a task untouched this long counts as stale

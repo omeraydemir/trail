@@ -28,7 +28,7 @@ lossy end-of-session reconstruction.
 T0 must stay free. A process system dies from taxing trivial work, so small work
 you are actually doing leaves no trace at all. `trail backlog` is for the other
 case — small work you are *not* doing — and keeps it in the repo without giving it
-a status, a board card or a distillation step. Size decides whether there is a
+a status, a board card or any lifecycle. Size decides whether there is a
 file; deferral decides whether there is a trace.
 
 Phases of one big task are not separate tasks unless they are worked separately.
@@ -52,14 +52,12 @@ Then, in any repo:
 trail init
 ```
 
-This creates `.trail/` (including an empty `backlog.md`), `DECISIONS.md`, and a
+This creates `.trail/` (including an empty `backlog.md`) and a
 `SKILL.md` for whichever agents the repo already uses. Agents disagree about where project skills live — Claude Code
 reads `.claude/skills/`, while Codex, Cursor and Gemini CLI read `.agents/skills/` —
 so `init` detects the marker directories present and writes to the right ones.
 
-`trail init --decisions docs/DECISIONS.md` puts the ledger somewhere else; the path
-lands in `.trail/config.yml`, and re-running `init` respects it. `init` never
-overwrites what is already there — `--force` refreshes a drifted `SKILL.md`, and
+`init` never overwrites what is already there — `--force` refreshes a drifted `SKILL.md`, and
 leaves your `config.yml` and `_template.md` alone.
 Force it with `trail init --agent claude|codex|cursor|gemini|all`.
 
@@ -79,7 +77,7 @@ printf 'one sentence\n' | trail write goal   # prose sections come from stdin
 trail status                            # what am I doing, what went stale
 trail ls --stale 7                      # untouched for a week
 trail board                             # terminal kanban
-trail done                              # distill into DECISIONS.md, mark done
+trail done                              # mark done, report the backlog around it
 ```
 
 `## Plan` items are checkboxes — `[ ]` not started, `[/]` written but not verified,
@@ -89,9 +87,16 @@ when the CLI cannot express what you mean, edit them, just keep the format intac
 
 `trail ls`, `trail show` and `trail status` take `--json`.
 
-`trail done` appends the raw log to `DECISIONS.md` and hands it to you to trim.
-The distillation is deliberately not automatic — it is the one place where being
-wrong is expensive.
+`trail done` flips the status and prints a closing report. It copies nothing, moves
+nothing and deletes nothing: the decision log is already permanent where it was
+written, and the backlog's one promise is that an item you mentioned is still there
+tomorrow.
+
+**trail does not manage repo-lifetime decisions.** A task's log carries that task
+across its sessions and then stops being the point. When a decision is too big for a
+sentence — a dependency added, an invariant the next person will break — it wants a
+real document under your own `docs/`, written when you ask for one. trail will point
+at the candidate; it will not file it for you.
 
 ## One task or several
 
@@ -128,14 +133,13 @@ field. A hand-written cross-reference between tasks is stale within the hour.
   _template.md        yours to edit
   backlog.md          deferred small work — a flat list, no lifecycle
   tasks/<slug>.md     every task, open through done — files never move
-DECISIONS.md          permanent, versioned with the code
 ```
 
-Two artifacts, two lifetimes. `DECISIONS.md` sits outside `.trail/` so it stays
-committed even if you gitignore the task files.
+One artifact, one lifetime. A task file is written while the work happens and kept
+afterwards; nothing is distilled out of it into a second place.
 
 `.trail/` is committed by default. Working solo and want tasks off git? Add it to
-`.gitignore` — `DECISIONS.md` survives either way.
+`.gitignore` — but then nothing survives the session but the code.
 
 Because tasks are committed by default, they are readable by anyone with repo
 access: no credentials, customer identifiers or private notes in task files.
@@ -149,7 +153,6 @@ See [spec/FORMAT.md](spec/FORMAT.md) for the full format contract.
 ```yaml
 backlog: .trail/backlog.md
 dir: .trail/tasks
-decisions: DECISIONS.md
 template: .trail/_template.md
 stale_days: 7
 ```

@@ -93,9 +93,9 @@ def test_missing_scaffold_is_nudged_not_broken():
     try:
         (tmp / ".trail" / "tasks").mkdir(parents=True)
         cfg = t.load_config(tmp)
-        assert t.missing_scaffold(tmp, cfg) == [cfg["backlog"], cfg["decisions"]]
+        assert t.missing_scaffold(tmp, cfg) == [cfg["backlog"]]
         (tmp / cfg["backlog"]).write_text("# Backlog\n", "utf-8")
-        assert t.missing_scaffold(tmp, cfg) == [cfg["decisions"]]
+        assert t.missing_scaffold(tmp, cfg) == []
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -113,26 +113,25 @@ def test_end_to_end():
         subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
         run(tmp, "init")
         assert (tmp / ".trail/tasks").is_dir()
-        assert (tmp / "DECISIONS.md").is_file()
+        # trail no longer plants a decision record at the repo root: it does not
+        # manage repo-lifetime decisions, and the log is permanent where it is
+        assert not (tmp / "DECISIONS.md").exists()
         # the sink must be visible before first use, or nobody knows to empty it
         assert (tmp / ".trail/backlog.md").is_file()
         # no agent markers in a bare repo -> claude is the fallback
         assert (tmp / ".claude/skills/trail/SKILL.md").is_file()
         assert not (tmp / ".agents").exists()
 
-        # DECISIONS.md is configurable at init and re-init respects it
         tmp2 = Path(tempfile.mkdtemp())
         try:
             subprocess.run(["git", "init", "-q"], cwd=str(tmp2), check=True)
-            run(tmp2, "init", "--decisions", "docs/DECISIONS.md")
-            assert (tmp2 / "docs/DECISIONS.md").is_file()
-            assert not (tmp2 / "DECISIONS.md").exists()
-            run(tmp2, "init")  # must not plant a second ledger at the root
-            assert not (tmp2 / "DECISIONS.md").exists()
+            run(tmp2, "init")
             run(tmp2, "start", "x")
             run(tmp2, "log", "keep me")
-            run(tmp2, "done", "--no-edit")
-            assert "keep me" in (tmp2 / "docs/DECISIONS.md").read_text("utf-8")
+            run(tmp2, "done")
+            # the log stays in the task file; nothing is copied anywhere
+            assert "keep me" in (tmp2 / ".trail/tasks/x.md").read_text("utf-8")
+            assert not (tmp2 / "DECISIONS.md").exists()
             # a hand-edited config.yml is user content: no drift warning, no clobber
             conf = tmp2 / ".trail/config.yml"
             conf.write_text(conf.read_text("utf-8") + "stale_days: 3\n", "utf-8")
@@ -180,14 +179,13 @@ def test_end_to_end():
         # duplicate slug is refused
         run(tmp, "start", "deep-link", code=1)
 
-        run(tmp, "done", "--no-edit")
+        run(tmp, "done")
         # closing does not move the file: a closed task is the one that says what
         # was verified and what was left, and archiving hid it from every reader
         assert f.is_file()
         assert not (tmp / ".trail/archive/deep-link.md").exists()
         assert t.parse_fm(f.read_text("utf-8"))["status"] == "done"
-        dec = (tmp / "DECISIONS.md").read_text("utf-8")
-        assert "**dropped:** universal links" in dec and "## deep link" in dec
+        assert "**dropped:** universal links" in f.read_text("utf-8")
         assert "deep-link" not in run(tmp, "ls")          # done is out of the way
         assert "deep-link" in run(tmp, "ls", "--all")     # but never gone
 
@@ -262,14 +260,16 @@ def test_end_to_end():
         assert t.next_plan_item(f2.read_text("utf-8")) == "- [/] two"
         assert "1/3" in run(tmp, "ls")
 
-        # closing sweeps the ticked backlog lines of that task and keeps the rest
-        bl.write_text(bl.read_text("utf-8")
+        # closing reports the backlog around the task and changes nothing in it
+        before = bl.read_text("utf-8")
+        bl.write_text(before
                       + "- [x] finished thing #planned-item\n"
                       + "- [ ] left open on purpose #planned-item\n", "utf-8")
-        out = run(tmp, "done", "--task", "planned-item", "--no-edit")
-        assert "finished thing" not in bl.read_text("utf-8")
+        out = run(tmp, "done", "--task", "planned-item")
+        assert "finished thing" in bl.read_text("utf-8")        # nothing deleted
         assert "left open on purpose" in bl.read_text("utf-8")
-        assert "still open in the backlog" in out
+        assert "#planned-item -> 3 open, 1 done" in out   # two tagged earlier
+        assert "still open: - [ ] left open on purpose" in out
         # an empty body is a mistake, not an erasure
         r = subprocess.run([sys.executable, str(BIN), "write", "goal", "--task", "planned-item"],
                            cwd=str(tmp), input="  \n", capture_output=True, text=True)

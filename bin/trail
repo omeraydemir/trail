@@ -52,7 +52,6 @@ DEFAULTS = {
     # legacy: closing no longer moves anything. Readers still load this directory
     # when a repo initialised by an older trail has one; nothing writes to it.
     "archive": ".trail/archive",
-    "decisions": "DECISIONS.md",
     "template": ".trail/_template.md",
     "stale_days": 7,
 }
@@ -360,7 +359,7 @@ def code_newer_than(root: Path, ts: float) -> bool:
     except Exception:
         return False
     for n in names:
-        if n.startswith(".trail/") or n == "DECISIONS.md":
+        if n.startswith(".trail/"):
             continue
         try:
             if (root / n).stat().st_mtime > ts:
@@ -374,7 +373,7 @@ def missing_scaffold(root: Path, cfg: dict) -> list:
     """Files `init` would create that this repo does not have. A repo initialised by
     an older trail is not broken - both files are also created lazily on first write -
     but the feature stays invisible until someone re-runs init."""
-    return [cfg[k] for k in ("backlog", "decisions") if not (root / cfg[k]).exists()]
+    return [cfg[k] for k in ("backlog",) if not (root / cfg[k]).exists()]
 
 
 def nudges(root: Path, cfg: dict, tasks: list) -> list:
@@ -440,9 +439,7 @@ def cmd_init(args) -> int:
 
     conf = root / ".trail" / "config.yml"
     copy(INSTALL_ROOT / "templates" / "config.yml", conf)
-    if args.decisions:
-        set_config_key(conf, "decisions", args.decisions)
-    # read it back: a repo that moved DECISIONS.md must not get a second one at root
+
     cfg = load_config(root)
     copy(INSTALL_ROOT / "templates" / "_template.md", root / ".trail" / "_template.md")
     agents = args.agent or [a for a, m in AGENT_MARKERS.items() if (root / m).is_dir()]
@@ -460,11 +457,6 @@ def cmd_init(args) -> int:
         bl.write_text(BACKLOG_HEADER, "utf-8")
         made.append(cfg["backlog"])
 
-    dec = root / cfg["decisions"]
-    if not dec.exists():
-        dec.parent.mkdir(parents=True, exist_ok=True)
-        dec.write_text("# Decisions\n\nDistilled from task decision logs at `trail done`.\n", "utf-8")
-        made.append(cfg["decisions"])
 
     print("ready: %s" % root)
     for m in made:
@@ -681,63 +673,45 @@ def cmd_done(args) -> int:
     cfg = load_config(root)
     task = resolve_task(load_tasks(root, cfg), args.task)
 
-    log = get_section(task["text"], "Decision Log")
-    dec = root / cfg["decisions"]
-    header = "\n## %s\n\n_%s · %s · %s_\n\n" % (
-        task["title"], date.today().isoformat(), task["level"], task["id"])
-    body = log if log else "_(empty log)_"
-    with dec.open("a", encoding="utf-8") as fh:
-        fh.write(header + body + "\n")
-
     # The file does not move. The closed task is the most useful one in the
     # ledger - it is the only place that says what was verified and what was
     # left undone - and archiving hid it from every reader by default.
     task["path"].write_text(set_field(task["text"], "status", "done"), "utf-8")
-    swept, left = backlog_sweep(root, cfg, task["id"])
+    open_items, done_items = backlog_state(root, cfg, task["id"])
 
-    # Report every effect. The caller - usually an agent about to tell a human what
-    # happened - has no other view of it, and a deleted line exists nowhere else.
+    # A closing report, not a pipeline. Nothing is copied, moved or deleted: the
+    # decision log is already permanent where it was written, and the backlog's one
+    # promise is that an item the user mentioned is still there tomorrow.
     print("closed:  %s" % task["id"])
     print("status:  %s -> done" % task["status"])
     print("file:    %s (not moved)" % task["path"].relative_to(root))
-    print("log:     %d entr%s appended to %s"
+    print("log:     %d entr%s, kept in the task file"
           % (len(decision_entries(task["text"])),
-             "y" if len(decision_entries(task["text"])) == 1 else "ies", cfg["decisions"]))
-    if swept:
-        print("backlog: %d ticked item%s deleted (#%s):"
-              % (len(swept), "" if len(swept) == 1 else "s", task["id"]))
-        for item in swept:
-            print("           %s" % item)
-    for item in left:
-        print(c("still open in the backlog: %s" % item, "warn"))
-    editor = os.environ.get("EDITOR")
-    if editor and sys.stdin.isatty() and not args.no_edit:
-        subprocess.call([editor, str(dec)])
-    else:
-        print("DISTILL NOW: trim the last section of %s to 3-5 lines." % cfg["decisions"])
+             "y" if len(decision_entries(task["text"])) == 1 else "ies"))
+    if open_items or done_items:
+        print("backlog: #%s -> %d open, %d done"
+              % (task["id"], len(open_items), len(done_items)))
+        for item in open_items:
+            print(c("           still open: %s" % item, "warn"))
     return 0
 
 
-def backlog_sweep(root: Path, cfg: dict, slug: str):
-    """On close, drop the backlog lines tagged with this task that are ticked off;
-    report the rest. Deleting every tagged line would have destroyed real work -
-    report-2 closed leaving two deliberate open items behind."""
+def backlog_state(root: Path, cfg: dict, slug: str):
+    """(open, done) backlog lines tagged with this task. Read-only on purpose: the
+    first close left two deliberate open items behind, and a sink that deletes what
+    it holds is not a sink."""
     f = root / cfg["backlog"]
     if not f.is_file():
         return [], []
     tag = "#" + slug
-    kept, left, removed = [], [], []
+    open_items, done_items = [], []
     for line in f.read_text("utf-8").splitlines():
         s = line.strip()
-        if s.startswith("- ") and tag in s:
-            if CHECKBOX_RE.match(s) and CHECKBOX_RE.match(s).group(1) in "xX":
-                removed.append(s)
-                continue
-            left.append(s)
-        kept.append(line)
-    if removed:
-        f.write_text("\n".join(kept).rstrip() + "\n", "utf-8")
-    return removed, left
+        if not (s.startswith("- ") and tag in s):
+            continue
+        m = CHECKBOX_RE.match(s)
+        (done_items if m and m.group(1) in "xX" else open_items).append(s)
+    return open_items, done_items
 
 
 def _filter(tasks, args):
@@ -922,8 +896,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("init", help="set up .trail/ in this repo")
-    s.add_argument("--decisions", metavar="PATH",
-                   help="DECISIONS.md path, relative to the repo root (e.g. docs/DECISIONS.md)")
     s.add_argument("--force", action="store_true",
                    help="overwrite a SKILL.md that has drifted from the installed copy")
     s.add_argument("--agent", action="append",
@@ -980,9 +952,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--task")
     s.set_defaults(fn=cmd_handoff)
 
-    s = sub.add_parser("done", help="distill, close, archive")
+    s = sub.add_parser("done", help="close a task and report what is around it")
     s.add_argument("--task")
-    s.add_argument("--no-edit", action="store_true")
     s.set_defaults(fn=cmd_done)
 
     s = sub.add_parser("ls", help="task list")

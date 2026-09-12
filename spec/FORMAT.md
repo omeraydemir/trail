@@ -11,15 +11,18 @@ is the product.
   _template.md        task template, user-editable
   backlog.md          small items; a flat list, no frontmatter, no lifecycle
   tasks/<slug>.md     every task, open through done — files never move
-DECISIONS.md          distilled decisions — permanent, versioned with the code
 ```
 
 `trail init` also drops `SKILL.md` where the repo's agents look for project skills:
 `.claude/skills/trail/` for Claude Code, `.agents/skills/trail/` for Codex, Cursor and
 Gemini CLI. There is no single path every agent reads.
 
-`DECISIONS.md` sits outside `.trail/` on purpose: if a user gitignores `.trail/`,
-the permanent artifact still gets committed.
+trail keeps no second, repo-lifetime record. A decision log belongs to its task and
+stays in its file, which is now permanent; four closes across two real repos produced
+four untrimmed copies of the same content in a `DECISIONS.md` nobody ever distilled.
+What deserves to outlive the task is a document the user asks for, under the repo's
+own `docs/`, and that is theirs to decide — trail may point at the candidate, never
+file it.
 
 `.trail/` is committed by default. Solo users who want tasks off git add it to
 `.gitignore`; the two-lifetime split survives either choice.
@@ -143,8 +146,7 @@ That constraint — read once per session, cheaply — is what divides the mater
 the file stops answering "where am I", and the detail is re-read every session.
 
 A reference document lives under the repo's own docs convention, never inside
-`.trail/` — same reason `DECISIONS.md` sits outside it: a different lifetime. trail
-links such a document; it does not own it.
+`.trail/` — a different lifetime. trail links such a document; it does not own it.
 
 Drift between the two is not a real risk, because they do not overlap: the document
 holds the design and changes rarely, the task file holds the position and changes
