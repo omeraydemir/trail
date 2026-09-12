@@ -155,28 +155,35 @@ it now is).
 
 ## Splitting work across task files
 
-**One task is the default.** Splitting is the exception and it has to be argued for.
-
 The test is not size and not phase count:
 
 > When you sit down to phase 3, do you need phase 1's status and decisions in your
 > head?
 
-- **Yes** → one T2 task, phases as checkboxes under `## Plan`. Ten phases still
-  means one file: splitting it splits the context you were trying to carry.
-- **No** → separate tasks.
+- **Yes** → one T2 task, phases as checkboxes under `## Plan`.
+- **No** → separate tasks sharing one `group:`.
 
-The first real use split one report module into five tasks and failed this test in
-writing: each file's `## Out of Scope` pointed at the others by name. What actually
-drove the split was the source document's phase headings — **a document's sections
-are not task boundaries.** A plan document is organised for reading; a ledger is
-organised around what has to be in your head at once.
+Neither answer is the default, because both errors are real and they are opposite.
+Splitting work that shares its reasoning fragments the context the file exists to
+carry. Merging work that does not gives you one `## Status` for three independent
+fronts — it can describe none of them — and a file heavy enough that the small
+entries stop being written, which is the material worth keeping.
 
-When you do split, order still lives in the slug prefix (`auth-1-provider`,
-`auth-2-session`) — tasks sort by `(status, id)`, so the prefix carries it for free —
-and the relation lives in `group:`. Still no `after:`, no parent, no subtask, no
-index file listing children: a hand-written cross-reference goes stale within the
-hour, while a shared label cannot.
+So the failure is not a count, it is skipping the question. **A document's sections
+are a hypothesis, not task boundaries**: a plan document is organised for reading, a
+ledger around what has to be in your head at once. They sometimes coincide. Test it
+rather than assuming either way.
+
+Splitting is cheap only because `group:` exists. Order still lives in the slug prefix
+(`auth-1-provider`, `auth-2-session`) — tasks sort by `(status, id)`, so the prefix
+carries it for free — and the relation lives in `group:`, which the readers use to
+narrow themselves: `ls` and `board` show the active task's group and take `--all` or
+`--group <g>` to widen. Without it a ledger of forty tasks prints forty rows at every
+glance, which is the opposite of what this format is for.
+
+Still no `after:`, no parent, no subtask, and no index file listing children. An index
+is a cache of a view: `ls` and `board` derive it on read and cannot be wrong, while a
+stored copy has a second source of truth and task files are hand-editable.
 
 ## Template placeholders
 

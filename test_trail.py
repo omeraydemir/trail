@@ -239,6 +239,23 @@ def test_end_to_end():
         assert t.parse_fm(f2.read_text("utf-8"))["group"] == "report-module"
         assert "report-module" in run(tmp, "ls")
 
+        # readers narrow to the group being worked on: a forty-task board stops
+        # compressing context and starts being a project-management surface
+        run(tmp, "start", "other-1", "--group", "other", "--status", "open")
+        assert "group report-module" in run(tmp, "ls")
+        assert "other-1" not in run(tmp, "ls")
+        assert "other-1" in run(tmp, "ls", "--all")
+        assert "other-1" in run(tmp, "ls", "--group", "other")
+        assert "other-1" in run(tmp, "board", "--group", "other")
+        # an explicit filter asks a global question; narrowing it answers another one
+        assert "other-1" in run(tmp, "ls", "--status", "open")
+
+        # two active tasks: every writer already refuses, and status now says so
+        run(tmp, "set", "status", "active", "--task", "other-1")
+        assert "2 tasks are active" in run(tmp, "status")
+        run(tmp, "log", "ambiguous", code=1)
+        run(tmp, "set", "status", "open", "--task", "other-1")
+
         # write replaces a section, and creates one the template lacks
         f2.write_text(f2.read_text("utf-8"), "utf-8")
         r = subprocess.run([sys.executable, str(BIN), "write", "goal", "--task", "planned-item"],

@@ -67,7 +67,7 @@ session, for detail you almost never need. So climb:
 | why a recent decision went that way | `trail status --full` | + the why/dropped bodies |
 | the boundary, the open questions, the whole plan | `trail show <slug>` | the file |
 | to edit a section by hand | read the file | the file |
-| which tasks exist, in what shape | `trail ls`, `trail ls --all`, `trail ls --stale 7`, `trail board` | a few lines |
+| which tasks exist, in what shape | `trail ls`, `trail board` — both narrow to the active task's group; `--all` or `--group <g>` to widen | a few lines |
 
 `status` prints decision **titles** only; a title plus `--full` on demand is the
 difference between a 15-line session start and a 4,000-character one. Do not open the
@@ -116,26 +116,35 @@ They are separate axes, and conflating them is what loses work:
 
 **T1** 2-3 sessions · **T2** multi-day, and its file carries a `## Plan`.
 
-**One task is the default.** When work has several phases, the test for splitting it
-is not size and not the number of phases:
+When work has several phases, the test for splitting it is not size and not the
+number of phases:
 
 > **When you sit down to phase 3, do phase 1's decisions need to be in your head?**
 
-- **Yes** → one T2 task. Phases are checkboxes under `## Plan`. Ten phases still
-  means one file: splitting it splits the context you were trying to carry, leaving
-  one `## Status` and one decision log per fragment instead of one for the work.
-- **No**, the phases are worked independently → separate tasks.
+- **Yes** → one T2 task. Phases are checkboxes under `## Plan`.
+- **No**, the phases are worked independently → separate tasks, one `group:`.
 
-A reliable sign you are about to get this wrong: you are copying the phase headings
-of a document. **A document's sections are not task boundaries.** The first real use
-split one module into five tasks that way, and every file's `## Out of Scope` ended
-up pointing at the others by name — the test's own answer for "this is one task".
+Both answers cost something, so answer the question rather than reaching for a
+default. **Splitting too eagerly** fragments the context you were trying to carry:
+one `## Status` and one decision log per piece instead of one for the work.
+**Merging too eagerly** is the failure nobody warns you about: a file covering three
+independent fronts has one `## Status` that cannot say where you are on any of them,
+and once it feels heavy you quietly stop logging the small things — which is the part
+that was worth having.
+
+The mistake to actually avoid is skipping the test: **a document's sections are a
+hypothesis, not task boundaries.** Copying a plan's phase headings straight into the
+ledger is not an answer, it is an unexamined assumption. Sometimes the hypothesis is
+right; run the test and find out.
 
 When you do split, order lives in the **slug prefix** (`auth-1-provider`,
 `auth-2-session`) and the relation lives in **`group:`**, a slug the sibling tasks
-share. Never create a parent or index task that points at its children — a
-hand-written cross-reference is stale within the hour, a shared label cannot be.
-Assignees, priorities, due dates and dependency graphs are out of scope by design.
+share — this is what makes splitting cheap. Pass it on every task of a multi-task
+plan: `ls` and `board` narrow to the active task's group, so without it a growing
+ledger stops compressing context and starts being a project board. Never create a
+parent or index task that points at its children — a hand-written cross-reference is
+stale within the hour, a shared label cannot be. Assignees, priorities, due dates and
+dependency graphs are out of scope by design.
 
 ## Planning from a document
 
@@ -165,10 +174,9 @@ send you planning work that is finished. When the document and the code disagree
 - *Divergences* — every place the source disagrees with the repo: already done,
   wrong estimate, superseded decision. A plan approved without this schedules work
   that already exists.
-- *Tasks* — one line each: `slug · level · goal`. **One is the default.** A second
-  needs a sentence saying why these phases do not need each other's decisions; a
-  third means stopping and asking the user whether the split is right, because at
-  that point the more likely reading is that you are mirroring a document.
+- *Tasks* — one line each: `slug · level · goal`. Apply the splitting test above and
+  say in one sentence what it answered; a count with no reasoning behind it is the
+  sign you copied the source's structure instead of testing it.
 - *Backlog* — the small items, as the lines they will become.
 
 Then wait for approval. If something does not deserve a task, say so and let the

@@ -378,6 +378,12 @@ def missing_scaffold(root: Path, cfg: dict) -> list:
 
 def nudges(root: Path, cfg: dict, tasks: list) -> list:
     out = []
+    active = [t for t in tasks if t["status"] == "active"]
+    if len(active) > 1:
+        out.append("%d tasks are active (%s). Every writer now needs --task, and "
+                   "status is that many contexts at once. Park the rest with "
+                   "'trail set status open --task <id>'."
+                   % (len(active), ", ".join(t["id"] for t in active)))
     for t in tasks:
         if t["status"] not in ("active", "blocked"):
             continue
@@ -714,6 +720,26 @@ def backlog_state(root: Path, cfg: dict, slug: str):
     return open_items, done_items
 
 
+def scope_to_group(tasks: list, args):
+    """Narrow the readers to the group being worked on. At forty tasks a full board
+    stops compressing context and starts being a project-management surface, which
+    is the opposite of what this tool is for.
+
+    Returns (tasks, label). Any explicit filter wins - `--stale 7` asks "what did I
+    abandon", and narrowing that to one group answers the wrong question."""
+    if getattr(args, "all", False) or any(
+            getattr(args, k, None) for k in ("group", "status", "level", "stale")):
+        if getattr(args, "group", None):
+            g = slugify(args.group)
+            return [t for t in tasks if t["group"] == g], "group %s" % g
+        return tasks, ""
+    groups = {t["group"] for t in tasks if t["status"] == "active" and t["group"]}
+    if not groups:
+        return tasks, ""          # nothing active, or it carries no group
+    return ([t for t in tasks if t["group"] in groups],
+            "group " + " + ".join(sorted(groups)))
+
+
 def _filter(tasks, args):
     out = tasks
     if getattr(args, "status", None):
@@ -738,7 +764,8 @@ def _as_dict(t):
 def cmd_ls(args) -> int:
     root = find_root()
     cfg = load_config(root)
-    tasks = _filter(load_tasks(root, cfg, archived=args.all), args)
+    all_tasks = _filter(load_tasks(root, cfg, archived=args.all), args)
+    tasks, scope = scope_to_group(all_tasks, args)
     if args.json:
         print(json.dumps([_as_dict(t) for t in tasks], ensure_ascii=False, indent=2))
         return 0
@@ -747,12 +774,15 @@ def cmd_ls(args) -> int:
     if not tasks:
         print("no tasks")
         return 0
+    if scope:
+        print(c("%s · %d of %d tasks (--all for every task)"
+                % (scope, len(tasks), len(all_tasks)), "dim"))
     tasks.sort(key=work_order(tasks))
     w = max(len(t["id"]) for t in tasks)
     groups = {}
     for t in tasks:
         groups.setdefault(t["group"], []).append(t)
-    grouped = any(groups)   # any task carrying a group -> sections, not a column
+    grouped = len(groups) > 1   # one group needs no header: the scope line says it
     ind = "  " if grouped else ""
     print(c("%s%s  %-4s  %-8s  %5s  %5s  %s"
             % (ind, pad("ID", w), "LVL", "STATUS", "AGE", "PLAN", "TITLE"), "head"))
@@ -771,8 +801,12 @@ def cmd_ls(args) -> int:
 def cmd_board(args) -> int:
     root = find_root()
     cfg = load_config(root)
-    tasks = load_tasks(root, cfg, archived=args.all)
+    all_tasks = load_tasks(root, cfg, archived=args.all)
+    tasks, scope = scope_to_group(all_tasks, args)
     tasks.sort(key=work_order(tasks))
+    if scope:
+        print(c("%s · %d of %d tasks (--all for every task)"
+                % (scope, len(tasks), len(all_tasks)), "dim"))
     cols = [(s, [t["id"] for t in tasks if t["status"] == s]) for s in STATUSES]
     # width follows the ids; truncating them mid-word was the fastest way to make
     # the board unreadable ("report-3-rapor-say")
@@ -960,12 +994,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--status", choices=STATUSES)
     s.add_argument("--level")
     s.add_argument("--stale", type=int, metavar="N")
-    s.add_argument("--all", action="store_true", help="include the archive")
+    s.add_argument("--group", help="one group instead of the active task's")
+    s.add_argument("--all", action="store_true",
+                   help="every task and every group, plus a legacy archive")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_ls)
 
     s = sub.add_parser("board", help="terminal kanban")
-    s.add_argument("--all", action="store_true")
+    s.add_argument("--group", help="one group instead of the active task's")
+    s.add_argument("--all", action="store_true",
+                   help="every task and every group, plus a legacy archive")
     s.set_defaults(fn=cmd_board)
 
     s = sub.add_parser("show", help="one task in full")

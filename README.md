@@ -76,7 +76,8 @@ trail set status blocked                # status | level | title | group
 printf 'one sentence\n' | trail write goal   # prose sections come from stdin
 trail status                            # what am I doing, what went stale
 trail ls --stale 7                      # untouched for a week
-trail board                             # terminal kanban
+trail board                             # kanban, narrowed to the active group
+trail board --all                       # every group
 trail done                              # mark done, report the backlog around it
 ```
 
@@ -118,9 +119,10 @@ separate tasks, with order in the slug prefix (`auth-1-provider`, `auth-2-sessio
 and a shared `group:` in the frontmatter. Tasks sort by `(status, id)`, so the prefix
 orders them for free, and `ls` sections by group.
 
-One task is the default and a document's sections are not task boundaries — the
-fastest way to end up with five files that all reference each other is to copy the
-phase headings of a plan document.
+Neither answer is a default: splitting shared reasoning fragments the context the
+file exists to carry, and merging independent work gives you one `## Status` for
+three fronts plus a file too heavy to keep logging small things into. A plan
+document's sections are a hypothesis, not task boundaries — test them.
 
 `group:` is a label, not a parent: there is still no index file and no dependency
 field. A hand-written cross-reference between tasks is stale within the hour.
