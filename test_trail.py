@@ -26,6 +26,15 @@ def test_yaml():
     assert d["empty"] == [], d
 
 
+def test_title_is_always_quoted():
+    """A colon in an unquoted scalar invalidates the whole block. Two of the five
+    files in the first real ledger were unreadable to every other tool this way."""
+    assert t.yaml_quote('Report: pivot') == '"Report: pivot"'
+    src = '---\nid: a\ntitle: a\n---\n# a\n'
+    out = t.set_field(src, "title", t.yaml_quote('Report: pivot "matrix"'))
+    assert t.parse_fm(out)["title"] == 'Report: pivot "matrix"', t.parse_fm(out)
+
+
 def test_set_field_preserves_unknown():
     src = "---\nid: a\nstatus: active\nmine: keep-me\nlinks:\n  - x\n---\n# a\n"
     out = t.set_field(src, "status", "done")
@@ -155,7 +164,9 @@ def test_end_to_end():
         assert "{{" not in f.read_text("utf-8")
 
         run(tmp, "log", "use applinks", "--why", "no aasa host", "--dropped", "universal links")
-        assert "dropped: universal links" in f.read_text("utf-8")
+        # the entry is scannable: a title line, then the reasons indented under it
+        assert "  - **dropped:** universal links" in f.read_text("utf-8")
+        assert len(t.decision_entries(f.read_text("utf-8"))) == 1
 
         run(tmp, "handoff", "parser done")
         assert t.get_section(f.read_text("utf-8"), "Status") == "parser done"
@@ -170,11 +181,15 @@ def test_end_to_end():
         run(tmp, "start", "deep-link", code=1)
 
         run(tmp, "done", "--no-edit")
-        assert not f.exists()
-        assert (tmp / ".trail/archive/deep-link.md").is_file()
+        # closing does not move the file: a closed task is the one that says what
+        # was verified and what was left, and archiving hid it from every reader
+        assert f.is_file()
+        assert not (tmp / ".trail/archive/deep-link.md").exists()
+        assert t.parse_fm(f.read_text("utf-8"))["status"] == "done"
         dec = (tmp / "DECISIONS.md").read_text("utf-8")
-        assert "dropped: universal links" in dec and "## deep link" in dec
-        assert t.parse_fm((tmp / ".trail/archive/deep-link.md").read_text("utf-8"))["status"] == "done"
+        assert "**dropped:** universal links" in dec and "## deep link" in dec
+        assert "deep-link" not in run(tmp, "ls")          # done is out of the way
+        assert "deep-link" in run(tmp, "ls", "--all")     # but never gone
 
         # no active task left -> log must fail loudly, not silently pick one
         run(tmp, "log", "x", code=1)
@@ -209,8 +224,22 @@ def test_end_to_end():
 
         # backlog is a sink: a line, no lifecycle, and status shows only the count
         run(tmp, "backlog", "android smoke", "ask backend 3 questions")
-        assert (tmp / ".trail/backlog.md").read_text("utf-8").count("\n- ") == 2
-        assert "backlog: 2 items" in run(tmp, "status")
+        bl = tmp / ".trail/backlog.md"
+        assert bl.read_text("utf-8").count("\n- [ ] ") == 2
+        assert bl.read_text("utf-8").count("#planned-item") == 2   # tagged with the active task
+        assert "backlog: 2 open items" in run(tmp, "status")
+        run(tmp, "backlog", "unrelated", "--untagged")
+        assert "- [ ] unrelated\n" in bl.read_text("utf-8")
+
+        # ## Notes: free-form, dated, append-only - the section the CLI could not
+        # write to, which is why measurements ended up in the backlog instead
+        run(tmp, "note", "12 widgets, 9.6s cold")
+        assert "12 widgets, 9.6s cold" in t.get_section(f2.read_text("utf-8"), "Notes")
+
+        # group: the relation field, queryable from outside; no index file
+        run(tmp, "set", "group", "Report Module", "--task", "planned-item")
+        assert t.parse_fm(f2.read_text("utf-8"))["group"] == "report-module"
+        assert "report-module" in run(tmp, "ls")
 
         # write replaces a section, and creates one the template lacks
         f2.write_text(f2.read_text("utf-8"), "utf-8")
@@ -222,6 +251,25 @@ def test_end_to_end():
                            cwd=str(tmp), input="adim 1\nadim 2\n", capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         assert t.get_section(f2.read_text("utf-8"), "Plan") == "adim 1\nadim 2"
+
+        # plan progress: [x] counts, [-] leaves the denominator, [/] is not done yet
+        r = subprocess.run([sys.executable, str(BIN), "write", "plan", "--task", "planned-item"],
+                           cwd=str(tmp),
+                           input="- [x] one [completion:: 2026-09-12]\n- [/] two\n- [ ] three\n- [-] four\n",
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert t.plan_progress(f2.read_text("utf-8")) == (1, 3)
+        assert t.next_plan_item(f2.read_text("utf-8")) == "- [/] two"
+        assert "1/3" in run(tmp, "ls")
+
+        # closing sweeps the ticked backlog lines of that task and keeps the rest
+        bl.write_text(bl.read_text("utf-8")
+                      + "- [x] finished thing #planned-item\n"
+                      + "- [ ] left open on purpose #planned-item\n", "utf-8")
+        out = run(tmp, "done", "--task", "planned-item", "--no-edit")
+        assert "finished thing" not in bl.read_text("utf-8")
+        assert "left open on purpose" in bl.read_text("utf-8")
+        assert "still open in the backlog" in out
         # an empty body is a mistake, not an erasure
         r = subprocess.run([sys.executable, str(BIN), "write", "goal", "--task", "planned-item"],
                            cwd=str(tmp), input="  \n", capture_output=True, text=True)

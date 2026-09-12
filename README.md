@@ -23,7 +23,7 @@ lossy end-of-session reconstruction.
 | --- | --- | --- |
 | T0 | single session, cheap to undo | **nothing** — unless deferred, then one backlog line |
 | T1 | 2-3 sessions, one topic | task file + close |
-| T2 | multi-day, architectural | + `## Plan` + handoff each session |
+| T2 | multi-day, architectural | + a checkbox `## Plan` + handoff each session |
 
 T0 must stay free. A process system dies from taxing trivial work, so small work
 you are actually doing leaves no trace at all. `trail backlog` is for the other
@@ -72,14 +72,20 @@ trail link docs/deeplink-design.md      # point the task at the design
 trail log "route via AppLinks" \
      --why "Universal Links needs an AASA host we don't control" \
      --dropped "Universal Links"        # write it the moment you decide
+trail note "12 widgets, 9.6s cold, phases are serial"   # findings, free-form
 trail handoff "parser done, wiring the receiver next"
-trail set status blocked                # status | level | title
+trail set status blocked                # status | level | title | group
 printf 'one sentence\n' | trail write goal   # prose sections come from stdin
 trail status                            # what am I doing, what went stale
 trail ls --stale 7                      # untouched for a week
 trail board                             # terminal kanban
-trail done                              # distill into DECISIONS.md, archive
+trail done                              # distill into DECISIONS.md, mark done
 ```
+
+`## Plan` items are checkboxes — `[ ]` not started, `[/]` written but not verified,
+`[x]` verified, `[-]` cancelled — and `ls` reports the count, so "where did we stop"
+is answered without opening anything. Prefer the commands, but the files are yours:
+when the CLI cannot express what you mean, edit them, just keep the format intact.
 
 `trail ls`, `trail show` and `trail status` take `--json`.
 
@@ -89,8 +95,9 @@ wrong is expensive.
 
 ## One task or several
 
-The task file is injected into every session, so it holds only what you need in your
-head: goal, boundary, position, decisions. Anything you *consult* rather than
+The task file is what every session starts by reading — as a `trail status` digest,
+not the file itself — so it holds only what you need in your head: goal, boundary,
+position, decisions. Anything you *consult* rather than
 remember — a design, a spec, a long plan — lives in its own document under `docs/`
 and is attached with `trail link`. Pouring a two-week design into `## Plan` breaks
 the file and pollutes every session with detail you are not using yet.
@@ -100,13 +107,18 @@ When work has phases, the test for splitting is not size:
 > When you sit down to phase 3, do you need phase 1's status and decisions in your
 > head?
 
-**Yes** → one T2 task, phases as a checklist under `## Plan`. Ten phases still means
+**Yes** → one T2 task, phases as checkboxes under `## Plan`. Ten phases still means
 one file — splitting it splits the context you were trying to carry. **No** →
-separate tasks, with order in the slug prefix: `auth-1-provider`, `auth-2-session`.
-Tasks sort by `(status, id)`, so the prefix orders them for free.
+separate tasks, with order in the slug prefix (`auth-1-provider`, `auth-2-session`)
+and a shared `group:` in the frontmatter. Tasks sort by `(status, id)`, so the prefix
+orders them for free, and `ls` sections by group.
 
-There is no relation field and no index file. A hand-written cross-reference between
-tasks is stale within the hour.
+One task is the default and a document's sections are not task boundaries — the
+fastest way to end up with five files that all reference each other is to copy the
+phase headings of a plan document.
+
+`group:` is a label, not a parent: there is still no index file and no dependency
+field. A hand-written cross-reference between tasks is stale within the hour.
 
 ## Layout
 
@@ -115,8 +127,7 @@ tasks is stale within the hour.
   config.yml          optional
   _template.md        yours to edit
   backlog.md          deferred small work — a flat list, no lifecycle
-  tasks/<slug>.md     scaffolding — dies with the task
-  archive/<slug>.md
+  tasks/<slug>.md     every task, open through done — files never move
 DECISIONS.md          permanent, versioned with the code
 ```
 
@@ -138,7 +149,6 @@ See [spec/FORMAT.md](spec/FORMAT.md) for the full format contract.
 ```yaml
 backlog: .trail/backlog.md
 dir: .trail/tasks
-archive: .trail/archive
 decisions: DECISIONS.md
 template: .trail/_template.md
 stale_days: 7

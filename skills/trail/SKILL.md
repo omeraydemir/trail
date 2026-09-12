@@ -1,12 +1,15 @@
 ---
 name: trail
 description: Repo-local task ledger driven by the `trail` CLI — markdown task files in `.trail/tasks/` that carry work across sessions, and whose decision log records what was rejected and why. Use when work will span sessions, when a design decision with a rejected alternative is made, when resuming or handing off work, when closing a task, or when a backlog, spec, or brain dump needs breaking into tasks. Not for single-prompt work.
-argument-hint: status | plan <file|notes> | start <slug> [T1|T2] | log <decision> --why <why> --dropped <alt> | write <section> | link <path> | backlog <item> | set <field> <value> | handoff | done | ls
+argument-hint: <slug> | status | plan <file|notes> | start <slug> [T1|T2] | log <decision> --why <why> --dropped <alt> | note <finding> | write <section> | link <path> | backlog <item> | set <field> <value> | handoff | done | ls
 ---
 
 # trail
 
 **trail records why. Git records what.**
+
+Resuming: `/trail <slug>`. Passing the slug names the session after the work —
+a bare `/trail` leaves every resumed chat titled the same thing.
 
 A task file exists to carry one piece of work across the sessions it takes to
 finish. Git already holds every line that shipped; what it cannot hold is the
@@ -21,32 +24,55 @@ bug in this tool, not a rule to obey harder.
 
 | | |
 | --- | --- |
-| Must be in your head every session — goal, boundary, where you stopped, decisions | the **task file**; `trail status` injects it |
+| Must be in your head every session — goal, boundary, where you stopped, decisions | the **task file**; `trail status` digests it |
 | What you consult when you get to that part — designs, specs, long plans | a **reference document**, linked with `trail link` |
 | Small work you are **not** doing now | `.trail/backlog.md`, one line each |
 
 Putting a two-week design inside a task file breaks the first row: the file stops
 answering "where am I" and starts being something you scroll past.
 
-## Everything goes through the CLI
+## The CLI first, your hands second
 
-Every field in a task file has a command that writes it. Never hand-edit a task
-file. Editing by hand is how a section silently ends up empty and how a `level:`
-starts lying.
+Every field has a command that writes it, and the command is the better path: it
+dates things, it never leaves a section half-written, it keeps `level:` honest.
 
 | To write | Command |
 | --- | --- |
 | a decision | `trail log "<what>" --why "<why>" --dropped "<rejected alternative>"` |
+| a finding, a measurement, anything worth carrying | `trail note "<what>"` → `## Notes` |
 | `## Goal`, `## Out of Scope`, `## Plan`, `## Open Questions` | `trail write <section>` — body on stdin |
 | `## Status` | `trail handoff "<where you stopped + next step>"` |
 | a reference doc or code path | `trail link <path…>` |
-| `status`, `level`, `title` | `trail set <field> <value>` |
-| a new task | `trail start <slug> [T1\|T2] [--status open]` |
-| a small item you are deferring | `trail backlog "<item>"` |
-| closing | `trail done` — appends the raw log to `DECISIONS.md`, archives the file |
+| `status`, `level`, `title`, `group` | `trail set <field> <value>` |
+| a new task | `trail start <slug> [T1\|T2] [--status open] [--group <g>]` |
+| a small item you are deferring | `trail backlog "<item>"` — tagged `#<active task>` |
+| closing | `trail done` — appends the raw log to `DECISIONS.md`, marks the file done |
 
-Reading: `trail status` at the start of every session · `trail show <slug>` for one
-task in full · `trail ls`, `trail ls --stale 7`, `trail board` for the shape.
+**When the CLI cannot say what you mean, edit the file.** Tick a checkbox, fix a
+line, add a heading the format does not have. The one obligation is not breaking
+the format: frontmatter stays valid YAML, section headings keep their names, the
+decision log only ever grows. A rule you have to break to get work done is worse
+than no rule — and the previous version of this file had one.
+
+## Reading costs tokens. Climb, do not jump
+
+Nothing is injected automatically — there is no hook. `trail status` is a **digest**
+of the task file, not the file, and that is the point: it is the cheapest complete
+answer to "where am I". Reading the file instead costs ten to forty times more, every
+session, for detail you almost never need. So climb:
+
+| You need | Run | Roughly |
+| --- | --- | --- |
+| where am I, what is next, what went stale | `trail status` | ~15 lines |
+| why a recent decision went that way | `trail status --full` | + the why/dropped bodies |
+| the boundary, the open questions, the whole plan | `trail show <slug>` | the file |
+| to edit a section by hand | read the file | the file |
+| which tasks exist, in what shape | `trail ls`, `trail ls --all`, `trail ls --stale 7`, `trail board` | a few lines |
+
+`status` prints decision **titles** only; a title plus `--full` on demand is the
+difference between a 15-line session start and a 4,000-character one. Do not open the
+task file to "get more context" — name what you are missing and take the step that
+answers it.
 
 ## Rules
 
@@ -64,6 +90,15 @@ task in full · `trail ls`, `trail ls --stale 7`, `trail board` for the shape.
    and the human trims it. Getting this wrong is expensive.
 5. **Never summarize the session.** `trail handoff` rewrites `## Status`: where you
    stopped, what is next. The reasoning is already in the log.
+6. **Tick the box when it is true.** `## Plan` items are checkboxes: `[ ]` not
+   started · `[/]` written but not verified · `[x]` **verified** · `[-]` cancelled,
+   with why it fell out of scope written next to it. `[x]` is not "I wrote the
+   code"; on `[x]` append `[completion:: YYYY-MM-DD]`. Next session reads the boxes
+   instead of re-reading the code.
+7. **Decision or note?** Did you reject an alternative? → `trail log`. Anything else
+   worth carrying — a measurement, a discovery, a thing you tried that failed, a
+   detail from the conversation the next session would miss — → `trail note`.
+   `## Notes` has no format and no rules; use it freely.
 
 ## Levels, splitting, and order
 
@@ -77,21 +112,26 @@ They are separate axes, and conflating them is what loses work:
 
 **T1** 2-3 sessions · **T2** multi-day, and its file carries a `## Plan`.
 
-When work has several phases, the test for splitting it is not size and not the
-number of phases:
+**One task is the default.** When work has several phases, the test for splitting it
+is not size and not the number of phases:
 
 > **When you sit down to phase 3, do phase 1's decisions need to be in your head?**
 
-- **Yes** → one T2 task. Phases are a checklist under `## Plan`. Ten phases still
+- **Yes** → one T2 task. Phases are checkboxes under `## Plan`. Ten phases still
   means one file: splitting it splits the context you were trying to carry, leaving
   one `## Status` and one decision log per fragment instead of one for the work.
 - **No**, the phases are worked independently → separate tasks.
 
-When you do split, order and grouping go in the **slug prefix**, not in a field:
-`auth-1-provider`, `auth-2-session`, `auth-3-migration`. `ls` sorts by id, so the
-order comes out for free. Never create a parent or index task that points at its
-children — a hand-written cross-reference is stale within the hour. Assignees,
-priorities, due dates and dependency graphs are out of scope by design.
+A reliable sign you are about to get this wrong: you are copying the phase headings
+of a document. **A document's sections are not task boundaries.** The first real use
+split one module into five tasks that way, and every file's `## Out of Scope` ended
+up pointing at the others by name — the test's own answer for "this is one task".
+
+When you do split, order lives in the **slug prefix** (`auth-1-provider`,
+`auth-2-session`) and the relation lives in **`group:`**, a slug the sibling tasks
+share. Never create a parent or index task that points at its children — a
+hand-written cross-reference is stale within the hour, a shared label cannot be.
+Assignees, priorities, due dates and dependency graphs are out of scope by design.
 
 ## Planning from a document
 
@@ -121,8 +161,10 @@ send you planning work that is finished. When the document and the code disagree
 - *Divergences* — every place the source disagrees with the repo: already done,
   wrong estimate, superseded decision. A plan approved without this schedules work
   that already exists.
-- *Tasks* — one line each: `slug · level · goal`. Apply the splitting test above
-  before deciding how many there are.
+- *Tasks* — one line each: `slug · level · goal`. **One is the default.** A second
+  needs a sentence saying why these phases do not need each other's decisions; a
+  third means stopping and asking the user whether the split is right, because at
+  that point the more likely reading is that you are mirroring a document.
 - *Backlog* — the small items, as the lines they will become.
 
 Then wait for approval. If something does not deserve a task, say so and let the
@@ -146,13 +188,17 @@ prevent: the user approves the plan and their sentence is gone.
 **5. Create what was approved.**
 
 ```bash
-trail start <slug> <level> --title "<title>" --status open
-printf '%s\n' "<goal from the source>" | trail write goal --task <slug>
-printf '%s\n' "<boundary>"             | trail write scope --task <slug>
+trail start <slug> <level> --title "<title>" --status open [--group <shared slug>]
+printf '%s\n' "<goal from the source>"   | trail write goal --task <slug>
+printf '%s\n' "<boundary>"               | trail write scope --task <slug>
+printf -- '- [ ] %s\n' "<step>" "<step>" | trail write plan --task <slug>
 trail link docs/<the design>.md --task <slug>
 trail log "scope from <source>" --task <slug> --dropped "<left out, and why>"
-trail backlog "<each small item>"
+trail backlog "<each small item>" --task <slug>
 ```
+
+Pass `--group` whenever the run produces more than one task: it is the only thing
+that will tell them apart from unrelated work three weeks from now.
 
 That last `--dropped` is the only record of what the user said and the plan did not
 take. `--task` is required throughout: a parked task is not the active one.
