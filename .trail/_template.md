@@ -1,9 +1,10 @@
 ---
 id: {{id}}
-title: {{title}}
+title: "{{title}}"
 level: {{level}}
 status: {{status}}
 started: {{date}}
+group:
 links: []
 ---
 # {{title}}
@@ -11,13 +12,18 @@ links: []
 ## Goal
 <!-- One sentence: what makes this done. -->
 
+## Plan
+<!-- `- [ ]` todo · `- [/]` written, not verified · `- [x]` verified · `- [-]` cancelled -->
+
 ## Out of Scope
 <!-- An explicit boundary against scope creep. -->
 
-## Decision Log
-<!-- Grows via `trail log`: YYYY-MM-DD · decision · why: … · dropped: … -->
-
 ## Status
 <!-- Where you left off + the next step. `trail handoff` rewrites this. -->
+
+## Notes
+
+## Decision Log
+<!-- Grows via `trail log`; never rewritten. -->
 
 ## Open Questions
