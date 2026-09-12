@@ -107,6 +107,111 @@ def run(cwd, *args, **kw):
     return r.stdout
 
 
+def test_a_new_session_can_resume_from_the_reading_path_alone():
+    """The product promise, not the CLI: a session that runs only what the skill
+    tells it to run must land on the right work, inside the right boundary, knowing
+    that earlier findings exist. Both bugs this test was written for - a status that
+    hid the scope and a resume command that did not exist - survived nine passing
+    CLI tests."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        # a plan run parks its tasks; nothing is active afterwards
+        run(tmp, "start", "rapor-2-tablo", "T2", "--group", "rapor", "--status", "open")
+        run(tmp, "start", "rapor-3-sayfa", "T1", "--group", "rapor", "--status", "open")
+        for section, body in (("goal", "Tablo gercek veriyle ciziliyor.\n"),
+                              ("scope", "- Pivot MODULE DISI, rapor-5'e ait.\n"),
+                              ("plan", "- [x] kolon cozumu\n- [ ] sayfa hata yolu\n"),
+                              ("questions", "Cursor son satiri neden dusuruyor?\n")):
+            r = subprocess.run([sys.executable, str(BIN), "write", section,
+                                "--task", "rapor-2-tablo"],
+                               cwd=str(tmp), input=body, capture_output=True, text=True)
+            assert r.returncode == 0, r.stderr
+        run(tmp, "note", "olcum: 12 widget 9.6sn cold", "--task", "rapor-2-tablo")
+        run(tmp, "log", "cursor sayfalama", "--why", "sunucu 500'de kesiyor",
+            "--dropped", "istemci tarafi sayfalama", "--task", "rapor-2-tablo")
+
+        # --- a new session starts here, running only what the skill prescribes ---
+        out = run(tmp, "resume", "rapor-2-tablo")
+        assert "open -> active" in out                      # it was parked
+        assert "Tablo gercek veriyle" in out                # what is this
+        assert "- [ ] sayfa hata yolu" in out               # what is next
+        assert "Pivot MODULE DISI" in out                   # the boundary, not lost
+        assert "Notes 1" in out and "Open Questions 1" in out   # findings are visible
+        assert "cursor sayfalama" in out                    # last decisions
+
+        # and the flow completes: writers need no --task once something is resumed
+        run(tmp, "note", "devam")
+        run(tmp, "handoff", "kaldigim yer")
+        # blocked is still the task you are on
+        run(tmp, "set", "status", "blocked")
+        run(tmp, "log", "engel")
+        assert "engel" in (tmp / ".trail/tasks/rapor-2-tablo.md").read_text("utf-8")
+        # and a task you are not on can still be inspected
+        assert "rapor-3-sayfa" in run(tmp, "status", "--task", "rapor-3-sayfa")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_concurrent_writes_do_not_lose_entries():
+    """The one absolute promise is that the decision log only grows. Before the
+    lock, fifty parallel writes landed forty - and all fifty reported success."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "x")
+        procs = [subprocess.Popen([sys.executable, str(BIN), "log", "karar-%d" % i],
+                                  cwd=str(tmp), stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL) for i in range(20)]
+        assert all(p.wait() == 0 for p in procs)
+        text = (tmp / ".trail/tasks/x.md").read_text("utf-8")
+        assert len(t.decision_entries(text)) == 20, len(t.decision_entries(text))
+        assert not list((tmp / ".trail/tasks").glob("*.tmp"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_backlog_tags_are_exact_and_never_guessed():
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "auth-1")
+        bl = tmp / ".trail/backlog.md"
+        bl.write_text(bl.read_text("utf-8") + "- [x] baska is #auth-1-extra\n", "utf-8")
+        out = run(tmp, "done")
+        assert "#auth-1-extra" not in out          # a longer slug is a different task
+        assert "backlog:" not in out               # so the close sees no tagged line
+        assert "baska is #auth-1-extra" in bl.read_text("utf-8")   # and nothing is deleted
+        # two things in progress: refuse rather than tag by guess
+        run(tmp, "start", "a")
+        run(tmp, "start", "b")
+        run(tmp, "backlog", "belirsiz", code=1)
+        # nothing in progress at all is fine - the line lands untagged
+        run(tmp, "set", "status", "open", "--task", "a")
+        run(tmp, "set", "status", "open", "--task", "b")
+        run(tmp, "backlog", "sahipsiz")
+        assert "- [ ] sahipsiz\n" in bl.read_text("utf-8")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_find_root_stops_at_the_repo_boundary():
+    """A nested checkout must not reach the outer repo's ledger."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / ".git").mkdir()
+        (tmp / ".trail" / "tasks").mkdir(parents=True)
+        inner = tmp / "vendor" / "lib"
+        (inner / ".git").mkdir(parents=True)
+        assert t.find_root(inner) == inner.resolve()
+        assert t.find_root(tmp) == tmp.resolve()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_end_to_end():
     tmp = Path(tempfile.mkdtemp())
     try:

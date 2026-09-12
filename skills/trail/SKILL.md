@@ -8,8 +8,14 @@ argument-hint: <slug> | status | plan <file|notes> | start <slug> [T1|T2] | log 
 
 **trail records why. Git records what.**
 
-Resuming: `/trail <slug>`. Passing the slug names the session after the work —
-a bare `/trail` leaves every resumed chat titled the same thing.
+**Resuming:** `/trail <slug>`, then `trail resume <slug>`. That marks the task
+active and prints its status in one step; passing the slug also names the session
+after the work, where a bare `/trail` leaves every resumed chat titled the same.
+
+Every writer targets whatever is in progress, so once you have resumed, nothing else
+needs `--task`. Tasks are parked as `open` by planning, and `blocked` still counts as
+in progress. If two things are in progress the writers refuse rather than guess —
+park one with `trail set status open --task <id>`.
 
 A task file exists to carry one piece of work across the sessions it takes to
 finish. Git already holds every line that shipped; what it cannot hold is the
@@ -45,6 +51,7 @@ dates things, it never leaves a section half-written, it keeps `level:` honest.
 | a reference doc or code path | `trail link <path…>` |
 | `status`, `level`, `title`, `group` | `trail set <field> <value>` |
 | a new task | `trail start <slug> [T1\|T2] [--status open] [--group <g>]` |
+| picking one back up | `trail resume <slug>` — makes it active, prints its status |
 | a small item you are deferring | `trail backlog "<item>"` — tagged `#<active task>` |
 | closing | `trail done` — marks the task done and reports the backlog around it |
 
@@ -67,12 +74,15 @@ session, for detail you almost never need. So climb:
 | why a recent decision went that way | `trail status --full` | + the why/dropped bodies |
 | the boundary, the open questions, the whole plan | `trail show <slug>` | the file |
 | to edit a section by hand | read the file | the file |
+| where a task you are *not* on stands | `trail status --task <slug>` | ~15 lines |
 | which tasks exist, in what shape | `trail ls`, `trail board` — both narrow to the active task's group; `--all` or `--group <g>` to widen | a few lines |
 
 `status` prints decision **titles** only; a title plus `--full` on demand is the
-difference between a 15-line session start and a 4,000-character one. Do not open the
-task file to "get more context" — name what you are missing and take the step that
-answers it.
+difference between a 15-line session start and a 4,000-character one. It ends with a
+`Not shown:` line counting the notes, open questions and older decisions it left out,
+so nothing is invisible — you always know what you are choosing not to read. Do not
+open the task file to "get more context": name what you are missing and take the step
+that answers it.
 
 ## Rules
 
@@ -221,5 +231,5 @@ deleting the line by hand. Growing is normal; the failure signal is the opposite
 backlog filling with things that were *done* means T0 has started paying a tax.
 
 **7. Leave everything `open`.** Starting without `--status open` marks a task active;
-in bulk that gives six active tasks and a useless `trail status`. Promote exactly
-one with `trail set status active` when work actually begins.
+in bulk that gives six active tasks and a useless `trail status`. Promote exactly one,
+with `trail resume <slug>`, when work actually begins.

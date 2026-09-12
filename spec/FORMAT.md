@@ -104,6 +104,13 @@ code, and the reader learns what is left without cross-referencing `## Status`
 against a prose list. `ls` reports `verified / live` per task, where `[-]` leaves the
 denominator — cancelled is resolved, not pending.
 
+### Writes are serialised
+
+The log only ever grows, and that is a guarantee, not a description. Every writer
+re-reads the file under an exclusive lock (`.trail/.lock`) and replaces it atomically.
+Without that, two agents in one checkout silently lose entries while both commands
+report success — fifty concurrent writes landed forty.
+
 ### Decision log entry
 
 ```markdown
@@ -242,11 +249,13 @@ Each line is a checkbox and carries the `#<task-slug>` of the task it came out o
 a line can be traced back to its work and queried from outside. `trail backlog` tags
 with the active task unless you pass `--untagged`.
 
-`trail done` deletes the **ticked** lines tagged with the closing task — they are
-already recorded in the task file and the commits — and reports the unticked ones
-instead of touching them. That asymmetry is deliberate: the first real close left two
-open items in the backlog on purpose ("error path untested", "never tried on
-Android"), and deleting those would have destroyed the only record of them.
+`trail done` **reads** the backlog and changes nothing in it: it reports how many
+tagged lines are open and how many are ticked, and names the open ones. Closing a
+task is not a reason to delete what someone wrote down — the first real close left
+two open items behind on purpose ("error path untested", "never tried on Android"),
+and a sink that empties itself is not a sink.
+
+The tag must match a whole token: `#auth-1` does not match `#auth-1-extra`.
 
 Growth is expected; the failure signal is the opposite. Backlog lines describing work
 that was already done mean the boundary leaked and T0 started paying a tax. Lines

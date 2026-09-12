@@ -65,6 +65,7 @@ Force it with `trail init --agent claude|codex|cursor|gemini|all`.
 
 ```bash
 trail start deeplink-handling T1        # new task (--status open parks it for later)
+trail resume deeplink-handling          # pick a parked task up: active + its status
 trail backlog "android smoke test"      # small items, no ceremony
 trail link docs/deeplink-design.md      # point the task at the design
 trail log "route via AppLinks" \
@@ -75,6 +76,7 @@ trail handoff "parser done, wiring the receiver next"
 trail set status blocked                # status | level | title | group
 printf 'one sentence\n' | trail write goal   # prose sections come from stdin
 trail status                            # what am I doing, what went stale
+trail status --task other-thing         # a task you are not on
 trail ls --stale 7                      # untouched for a week
 trail board                             # kanban, narrowed to the active group
 trail board --all                       # every group

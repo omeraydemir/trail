@@ -7,6 +7,7 @@ The point is not the task list; it is the decision log inside each task.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -15,6 +16,11 @@ import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:      # Windows: no advisory locks, writes stay unserialised
+    fcntl = None
 
 VERSION = "0.1.0"
 STATUSES = ["open", "active", "blocked", "done"]
@@ -160,6 +166,44 @@ def set_list_field(text: str, key: str, items) -> str:
 
 
 # --------------------------------------------------------------------------
+# serialised writes
+# --------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def ledger_lock(root: Path):
+    """One advisory lock for the whole ledger. Contention is a non-issue here and a
+    single lock is the only shape that also covers writes touching two files."""
+    if fcntl is None:
+        yield
+        return
+    path = root / ".trail" / ".lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def update_task(root: Path, task: dict, fn) -> str:
+    """Re-read under the lock, transform, replace atomically.
+
+    Every writer used to transform the copy loaded before the command started and
+    write the whole file back. Fifty concurrent `log`s landed forty entries - and
+    reported fifty successes. Locking the write alone does not help: the read has to
+    be inside the lock too, or one process still overwrites what the other appended."""
+    with ledger_lock(root):
+        text = task["path"].read_text("utf-8")
+        new = fn(text)
+        tmp = task["path"].with_name(task["path"].name + ".tmp")
+        tmp.write_text(new, "utf-8")
+        os.replace(str(tmp), str(task["path"]))
+    task["text"] = new
+    return new
+
+
+# --------------------------------------------------------------------------
 # markdown sections
 # --------------------------------------------------------------------------
 
@@ -263,9 +307,8 @@ def find_root(start: Path = None) -> Path:
     for d in [p] + list(p.parents):
         if (d / ".trail").is_dir():
             return d
-    for d in [p] + list(p.parents):
         if (d / ".git").exists():
-            return d
+            return d    # repo boundary: a nested repo must not reach the outer ledger
     return p
 
 
@@ -328,19 +371,27 @@ def work_order(tasks: list):
     return lambda t: (order.get(t["status"], 9), t["id"])
 
 
-def resolve_task(tasks: list, ident: str = None) -> dict:
+def resolve_task(tasks: list, ident: str = None, optional: bool = False):
+    """The implicit target is whatever is in progress. `blocked` counts: a task you
+    parked on a dependency is still the one you are on, and refusing to hand it off
+    or close it was a dead end. `optional` returns None when nothing is in progress -
+    it never hides ambiguity, which is a different problem with a different answer."""
     if ident:
         for t in tasks:
             if t["id"] == ident or t["path"].stem == ident:
                 return t
         raise TrailError("no such task: %s" % ident)
-    active = [t for t in tasks if t["status"] == "active"]
-    if len(active) == 1:
-        return active[0]
-    if not active:
-        raise TrailError("no active task. Run 'trail start <slug>' or pass --task.")
-    ids = ", ".join(t["id"] for t in active)
-    raise TrailError("more than one active task, pass --task: %s" % ids)
+    for wanted in ("active", "blocked"):
+        cand = [t for t in tasks if t["status"] == wanted]
+        if len(cand) == 1:
+            return cand[0]
+        if cand:
+            raise TrailError("more than one %s task, pass --task: %s"
+                             % (wanted, ", ".join(t["id"] for t in cand)))
+    if optional:
+        return None
+    raise TrailError("nothing in progress. Pick a task up with 'trail resume <slug>' "
+                     "(or 'trail start <slug>'), or pass --task.")
 
 
 # --------------------------------------------------------------------------
@@ -391,7 +442,9 @@ def nudges(root: Path, cfg: dict, tasks: list) -> list:
         if age >= cfg["stale_days"]:
             out.append("%s: untouched for %s days. Still active? Close it or carry on." % (t["id"], age))
         elif code_newer_than(root, t["mtime"]):
-            out.append("%s: code moved, log did not. Write the decision with 'trail log'." % t["id"])
+            out.append("%s: code moved, the file did not. If a decision was made, "
+                       "'trail log'; if it was a finding, 'trail note'; if neither, "
+                       "ignore this." % t["id"])
     return out
 
 
@@ -448,7 +501,12 @@ def cmd_init(args) -> int:
 
     cfg = load_config(root)
     copy(INSTALL_ROOT / "templates" / "_template.md", root / ".trail" / "_template.md")
+    # `.agents/skills` is a destination this tool writes to, so a repo that already
+    # has one is already an agent repo - detecting only the per-vendor markers sent
+    # those repos back to the Claude default.
     agents = args.agent or [a for a, m in AGENT_MARKERS.items() if (root / m).is_dir()]
+    if not args.agent and (root / ".agents" / "skills").is_dir():
+        agents.append("codex")   # any of codex/cursor/gemini resolves to .agents/skills
     if "all" in agents:
         agents = list(AGENT_SKILL_PATHS)
     if not agents:
@@ -456,6 +514,11 @@ def cmd_init(args) -> int:
     src = INSTALL_ROOT / "skills" / "trail" / "SKILL.md"
     for dest in sorted({AGENT_SKILL_PATHS[a] for a in agents}):
         copy(src, root / dest, shipped=True)
+
+    ign = root / ".trail" / ".gitignore"
+    if not ign.exists():
+        ign.write_text(".lock\n", "utf-8")   # the advisory lock is machine state
+        made.append(".trail/.gitignore")
 
     bl = root / cfg["backlog"]
     if not bl.exists():
@@ -551,7 +614,7 @@ def cmd_set(args) -> int:
                          % (args.field, ", ".join(allowed), extra))
     old = task["fm"].get(args.field) or task.get(args.field) or "-"
     written = yaml_quote(value) if args.field == "title" else value
-    task["path"].write_text(set_field(task["text"], args.field, written), "utf-8")
+    update_task(root, task, lambda txt: set_field(txt, args.field, written))
     print("%s: %s %s -> %s" % (task["id"], args.field, old, value or "-"))
     return 0
 
@@ -573,11 +636,12 @@ def cmd_backlog(args) -> int:
         f.write_text(BACKLOG_HEADER, "utf-8")
     tag = ""
     if not args.untagged:
-        try:
-            tag = " #" + resolve_task(load_tasks(root, cfg), args.task)["id"]
-        except TrailError:
-            if args.task:
-                raise
+        # optional: an untagged line is fine when nothing is in progress. Two active
+        # tasks is not that case - `log` refuses there, and guessing a tag silently
+        # is worse than refusing, because the wrong tag reads as fact later.
+        owner = resolve_task(load_tasks(root, cfg), args.task, optional=True)
+        if owner:
+            tag = " #" + owner["id"]
     with f.open("a", encoding="utf-8") as fh:
         for item in args.item:
             fh.write("- [ ] %s%s\n" % (item.strip(), tag))
@@ -605,11 +669,13 @@ def cmd_link(args) -> int:
     root = find_root()
     cfg = load_config(root)
     task = resolve_task(load_tasks(root, cfg), args.task)
-    links = list(task["links"])
-    for path in args.path:
-        if path not in links:
-            links.append(path)
-    task["path"].write_text(set_list_field(task["text"], "links", links), "utf-8")
+    def add(txt):
+        links = list(parse_fm(txt).get("links") or [])
+        for path in args.path:
+            if path not in links:
+                links.append(path)
+        return set_list_field(txt, "links", links)
+    links = parse_fm(update_task(root, task, add)).get("links") or []
     print("%s: links -> %s" % (task["id"], ", ".join(links)))
     return 0
 
@@ -628,8 +694,7 @@ def cmd_write(args) -> int:
     heading = SECTIONS.get(key) or canonical.get(key)
     if not heading:
         raise TrailError("section must be one of: %s" % ", ".join(sorted(set(SECTIONS.values()))))
-    text = set_section(task["text"], heading, body, create=True)
-    task["path"].write_text(text, "utf-8")
+    update_task(root, task, lambda txt: set_section(txt, heading, body, create=True))
     n = len(body.splitlines())
     print("%s: ## %s written (%d line%s)" % (task["id"], heading, n, "" if n == 1 else "s"))
     return 0
@@ -644,8 +709,8 @@ def cmd_log(args) -> int:
         entry += "\n  - **why:** " + args.why.strip()
     if args.dropped:
         entry += "\n  - **dropped:** " + args.dropped.strip()
-    text = append_section(task["text"], "Decision Log", entry, create=True)
-    task["path"].write_text(text, "utf-8")
+    update_task(root, task,
+                lambda txt: append_section(txt, "Decision Log", entry, create=True))
     print("%s <- %s" % (task["id"], entry.splitlines()[0]))
     return 0
 
@@ -658,8 +723,7 @@ def cmd_note(args) -> int:
     cfg = load_config(root)
     task = resolve_task(load_tasks(root, cfg), args.task)
     line = "- **%s** · %s" % (date.today().isoformat(), args.text.strip())
-    task["path"].write_text(
-        append_section(task["text"], "Notes", line, create=True), "utf-8")
+    update_task(root, task, lambda txt: append_section(txt, "Notes", line, create=True))
     print("%s <- %s" % (task["id"], line))
     return 0
 
@@ -668,8 +732,7 @@ def cmd_handoff(args) -> int:
     root = find_root()
     cfg = load_config(root)
     task = resolve_task(load_tasks(root, cfg), args.task)
-    text = set_section(task["text"], "Status", args.text.strip())
-    task["path"].write_text(text, "utf-8")
+    update_task(root, task, lambda txt: set_section(txt, "Status", args.text.strip()))
     print("%s: ## Status updated" % task["id"])
     return 0
 
@@ -682,7 +745,7 @@ def cmd_done(args) -> int:
     # The file does not move. The closed task is the most useful one in the
     # ledger - it is the only place that says what was verified and what was
     # left undone - and archiving hid it from every reader by default.
-    task["path"].write_text(set_field(task["text"], "status", "done"), "utf-8")
+    update_task(root, task, lambda txt: set_field(txt, "status", "done"))
     open_items, done_items = backlog_state(root, cfg, task["id"])
 
     # A closing report, not a pipeline. Nothing is copied, moved or deleted: the
@@ -694,6 +757,16 @@ def cmd_done(args) -> int:
     print("log:     %d entr%s, kept in the task file"
           % (len(decision_entries(task["text"])),
              "y" if len(decision_entries(task["text"])) == 1 else "ies"))
+    pr = plan_progress(task["text"])
+    if pr:
+        marks = [m.group(1) for m in CHECKBOX_RE.finditer(get_section(task["text"], "Plan"))]
+        rest = [("%d unverified [/]" % marks.count("/")) if "/" in marks else "",
+                ("%d not started [ ]" % marks.count(" ")) if " " in marks else ""]
+        rest = [r for r in rest if r]
+        print("plan:    %d/%d verified%s"
+              % (pr[0], pr[1], (", " + ", ".join(rest)) if rest else ""))
+        if rest:
+            print(c("           closing with plan items open - deliberate?", "warn"))
     if open_items or done_items:
         print("backlog: #%s -> %d open, %d done"
               % (task["id"], len(open_items), len(done_items)))
@@ -709,12 +782,12 @@ def backlog_state(root: Path, cfg: dict, slug: str):
     f = root / cfg["backlog"]
     if not f.is_file():
         return [], []
-    tag = "#" + slug
+    tag = re.compile(r"(?:^|\s)#" + re.escape(slug) + r"(?=\s|$)")
     open_items, done_items = [], []
     for line in f.read_text("utf-8").splitlines():
         s = line.strip()
-        if not (s.startswith("- ") and tag in s):
-            continue
+        if not (s.startswith("- ") and tag.search(s)):
+            continue    # substring matching counted #auth-1-extra as #auth-1's
         m = CHECKBOX_RE.match(s)
         (done_items if m and m.group(1) in "xX" else open_items).append(s)
     return open_items, done_items
@@ -738,6 +811,28 @@ def scope_to_group(tasks: list, args):
         return tasks, ""          # nothing active, or it carries no group
     return ([t for t in tasks if t["group"] in groups],
             "group " + " + ".join(sorted(groups)))
+
+
+def cmd_resume(args) -> int:
+    """Pick a task up again. The skill parks planned tasks as `open`, and every
+    writer targets whatever is in progress - so without this the documented way to
+    start work ('trail set status active') failed with 'no active task'."""
+    root = find_root()
+    cfg = load_config(root)
+    tasks = load_tasks(root, cfg)
+    task = resolve_task(tasks, args.slug)
+    if task["status"] == "done":
+        raise TrailError("%s is done. Reopen it first: "
+                         "trail set status open --task %s" % (task["id"], task["id"]))
+    if task["status"] != "active":
+        update_task(root, task, lambda txt: set_field(txt, "status", "active"))
+        print("%s: %s -> active" % (task["id"], task["status"]))
+    for other in tasks:
+        if other["status"] == "active" and other["id"] != task["id"]:
+            print(c("also active: %s — park it with 'trail set status open --task %s'"
+                    % (other["id"], other["id"]), "warn"))
+    args.task = task["id"]
+    return cmd_status(args)
 
 
 def _filter(tasks, args):
@@ -766,11 +861,11 @@ def cmd_ls(args) -> int:
     cfg = load_config(root)
     all_tasks = _filter(load_tasks(root, cfg, archived=args.all), args)
     tasks, scope = scope_to_group(all_tasks, args)
-    if args.json:
-        print(json.dumps([_as_dict(t) for t in tasks], ensure_ascii=False, indent=2))
-        return 0
     if not args.all and not getattr(args, "status", None):
         tasks = [t for t in tasks if t["status"] != "done"]
+    if args.json:   # same selection as the table: the format must not pick the data
+        print(json.dumps([_as_dict(t) for t in tasks], ensure_ascii=False, indent=2))
+        return 0
     if not tasks:
         print("no tasks")
         return 0
@@ -843,7 +938,8 @@ def cmd_status(args) -> int:
     root = find_root()
     cfg = load_config(root)
     tasks = load_tasks(root, cfg)
-    live = [t for t in tasks if t["status"] in ("active", "blocked")]
+    live = ([resolve_task(tasks, args.task)] if args.task
+            else [t for t in tasks if t["status"] in ("active", "blocked")])
     ns = nudges(root, cfg, tasks)
     gap = missing_scaffold(root, cfg)
     if gap:
@@ -882,6 +978,11 @@ def cmd_status(args) -> int:
         st = get_section(t["text"], "Status")
         if st:
             blocks.append(lab("Status:") + " " + st.replace("\n", " "))
+        # the boundary is short and it is the one section that stops the wrong work
+        # being done; leaving it out of the digest was how scope got lost
+        scope = get_section(t["text"], "Out of Scope")
+        if scope:
+            blocks.append(lab("Out of scope:") + "\n" + scope)
         if t["links"]:
             blocks.append(lab("Links:") + " " + ", ".join(t["links"]))
         # titles only: printing five full entries put ~4k characters of prose in
@@ -894,6 +995,22 @@ def cmd_status(args) -> int:
                 if args.full:
                     block.extend("  " + b for b in body)
             blocks.append("\n".join(block))
+        # A digest must not hide that it is one. Counts, not content: a new session
+        # cannot ask for what it does not know exists.
+        def entries(sec):
+            body = get_section(t["text"], sec)
+            bullets = [l for l in body.splitlines() if l.strip().startswith("- ")]
+            return bullets or [l for l in body.splitlines() if l.strip()]
+        inv = []
+        for sec in ("Notes", "Open Questions"):
+            n = len(entries(sec))
+            if n:
+                inv.append("%s %d" % (sec, n))
+        if len(dec) > 5:
+            inv.append("Decisions %d (last 5 above)" % len(dec))
+        if inv:
+            blocks.append("%s %s — trail show %s"
+                          % (lab("Not shown:"), " · ".join(inv), t["id"]))
         lines.append("\n\n".join(blocks))
         lines.append("")
     if n_backlog:
@@ -1011,12 +1128,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_show)
 
-    s = sub.add_parser("status", help="active tasks + nudges")
+    s = sub.add_parser("status", help="what is in progress + nudges")
+    s.add_argument("--task", help="one task by slug, whatever its status")
     s.add_argument("--full", action="store_true",
                    help="print the why/dropped bodies, not just decision titles")
     s.add_argument("--inject", action="store_true", help="wrap in delimiters for context injection")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("resume", help="pick a task up again and print its status")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_resume, task=None, full=False, inject=False, json=False)
     return p
 
 
