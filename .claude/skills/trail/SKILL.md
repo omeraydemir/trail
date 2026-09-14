@@ -14,8 +14,9 @@ after the work, where a bare `/trail` leaves every resumed chat titled the same.
 
 Every writer targets whatever is in progress, so once you have resumed, nothing else
 needs `--task`. Tasks are parked as `open` by planning, and `blocked` still counts as
-in progress. If two things are in progress the writers refuse rather than guess —
-park one with `trail set status open --task <id>`.
+in progress: with one active and one blocked task the writers take the active one.
+Two of the same status and they refuse rather than guess — park one with
+`trail set status open --task <id>`.
 
 A task file exists to carry one piece of work across the sessions it takes to
 finish. Git already holds every line that shipped; what it cannot hold is the
@@ -108,7 +109,9 @@ that answers it.
    started · `[/]` written but not verified · `[x]` **verified** · `[-]` cancelled,
    with why it fell out of scope written next to it. `[x]` is not "I wrote the
    code"; on `[x]` append `[completion:: YYYY-MM-DD]`. Next session reads the boxes
-   instead of re-reading the code.
+   instead of re-reading the code. Never write `- [ ] 1. …`: a digit and a dot after
+   the box start an ordered list inside the item and the checkbox stops rendering.
+   A numbered step is `- [ ] **1.** …`.
 7. **Decision or note?** Did you reject an alternative? → `trail log`. Anything else
    worth carrying — a measurement, a discovery, a thing you tried that failed, a
    detail from the conversation the next session would miss — → `trail note`.

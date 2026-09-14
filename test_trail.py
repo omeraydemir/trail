@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -168,6 +169,93 @@ def test_concurrent_writes_do_not_lose_entries():
         assert all(p.wait() == 0 for p in procs)
         text = (tmp / ".trail/tasks/x.md").read_text("utf-8")
         assert len(t.decision_entries(text)) == 20, len(t.decision_entries(text))
+        assert not list((tmp / ".trail/tasks").glob("*.tmp"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+RACE_CHILD = """
+import importlib.machinery, importlib.util, pathlib, sys, time
+loader = importlib.machinery.SourceFileLoader("trail", %r)
+spec = importlib.util.spec_from_loader("trail", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+orig = pathlib.Path.read_text
+def slow(self, *a, **k):          # stall between the template read and the write
+    if self.name == "_template.md":
+        time.sleep(2)
+    return orig(self, *a, **k)
+pathlib.Path.read_text = slow
+sys.exit(m.main(["start", "x"]))
+"""
+
+
+def test_start_never_overwrites_an_existing_task():
+    """`start` used to check exists() and write in two steps. In the gap a second
+    process created the task and had a decision logged against it; the first
+    process's write then erased the decision - and all three commands exited 0."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        child = subprocess.Popen([sys.executable, "-c", RACE_CHILD % str(BIN)],
+                                 cwd=str(tmp), stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        time.sleep(0.5)                       # child is now stalled mid-start
+        run(tmp, "start", "x")
+        run(tmp, "log", "karar", "--why", "neden", "--dropped", "alternatif")
+        assert child.wait() == 1               # the loser fails, loudly
+        text = (tmp / ".trail/tasks/x.md").read_text("utf-8")
+        assert len(t.decision_entries(text)) == 1, text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+VISIBILITY_CHILD = ("""
+import builtins, importlib.machinery, importlib.util, os, sys, time
+loader = importlib.machinery.SourceFileLoader("trail", %r)
+spec = importlib.util.spec_from_loader("trail", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+# stall at whichever call makes the task visible, so the parent gets a full window
+orig_open, orig_link = builtins.open, os.link
+def slow_open(f, mode="r", *a, **k):
+    fh = orig_open(f, mode, *a, **k)
+    if "x" in mode:
+        time.sleep(2)
+    return fh
+def slow_link(src, dst, *a, **k):
+    orig_link(src, dst, *a, **k)
+    time.sleep(2)
+builtins.open, os.link = slow_open, slow_link
+sys.exit(m.main(["start", "same"]))
+""" % str(BIN))
+
+
+def test_a_task_is_never_visible_half_written():
+    """`start` wrote the template into a file that was already visible and empty.
+    A `log` that landed in that window replaced the file, start's own write went to
+    the unlinked inode, and the task that survived had no frontmatter and no
+    sections - `handoff` then failed with `no '## Status' section`."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        dest = tmp / ".trail/tasks/same.md"
+        child = subprocess.Popen([sys.executable, "-c", VISIBILITY_CHILD],
+                                 cwd=str(tmp), stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        deadline = time.time() + 10
+        while not dest.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert dest.exists(), "start never created the task"
+        run(tmp, "log", "karar", "--task", "same", "--why", "neden",
+            "--dropped", "alternatif")
+        assert child.wait() == 0
+        text = dest.read_text("utf-8")
+        assert t.parse_fm(text).get("id") == "same", text   # frontmatter survived
+        assert t.section_bounds(text, "Status"), text       # and so did the sections
+        assert len(t.decision_entries(text)) == 1, text     # the decision too
         assert not list((tmp / ".trail/tasks").glob("*.tmp"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

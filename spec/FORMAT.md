@@ -99,6 +99,11 @@ use: *these came from the same plan*.
 | `[x]` | verified. Not "I wrote it": verified. `[completion:: YYYY-MM-DD]` is Dataview's inline-field syntax and is optional everywhere else |
 | `[-]` | cancelled — the item stays, with why it fell out of scope next to it |
 
+Nothing else goes between the box and the text. `- [ ] 1. Measure first` opens an
+ordered list *inside* the task item, which is not what it looks like and breaks
+checkbox rendering; if an item needs a number, write it as text — `- [ ] **1.**
+Measure first`.
+
 This is the whole set. The next session reads the boxes instead of re-reading the
 code, and the reader learns what is left without cross-referencing `## Status`
 against a prose list. `ls` reports `verified / live` per task, where `[-]` leaves the

@@ -556,8 +556,6 @@ def cmd_start(args) -> int:
     if not slug:
         raise TrailError("invalid slug")
     dest = root / cfg["dir"] / (slug + ".md")
-    if dest.exists():
-        raise TrailError("already exists: %s" % dest.relative_to(root))
 
     level = (args.level or "T1").upper()
     if level not in ("T1", "T2"):
@@ -584,7 +582,20 @@ def cmd_start(args) -> int:
         text = set_field(text, "group", slugify(args.group))
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text, "utf-8")
+    # Write the file whole, then make it visible in one step. os.link is the
+    # create-only-if-absent counterpart to update_task's os.replace: it refuses to
+    # clobber, and no other command can ever observe the task half-written.
+    # `open(dest, "x")` closed the start/start race but left that second gap - the
+    # empty file was already visible, so a concurrent `log` replaced it and start's
+    # own write landed on an unlinked inode, with both commands reporting success.
+    tmp = dest.with_name("%s.%d.tmp" % (dest.name, os.getpid()))
+    tmp.write_text(text, "utf-8")
+    try:
+        os.link(str(tmp), str(dest))
+    except FileExistsError:
+        raise TrailError("already exists: %s" % dest.relative_to(root))
+    finally:
+        tmp.unlink()
     print("created: %s" % dest.relative_to(root))
     return 0
 
@@ -989,7 +1000,10 @@ def cmd_status(args) -> int:
         # front of every session, and nobody read it. `--full` still can.
         dec = decision_entries(t["text"])
         if dec:
-            block = [lab("Recent decisions") + " (trail status --full for the reasons):"]
+            # keep the target: a bare `--full` re-selects active/blocked tasks, so the
+            # task being read here would vanish from the very command that explains it
+            more = "trail status%s --full" % (" --task " + t["id"] if args.task else "")
+            block = [lab("Recent decisions") + " (%s for the reasons):" % more]
             for title, body in dec[-5:]:
                 block.append("  " + title)
                 if args.full:
