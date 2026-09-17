@@ -261,6 +261,29 @@ def test_a_task_is_never_visible_half_written():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_search_returns_the_whole_decision_entry():
+    """`rg` matches a line; this format's unit is an entry. A hit inside a
+    `dropped:` body has to bring the decision it belongs to back with it, or the
+    answer to "have we already ruled this out?" is a fragment with no subject."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "auth")
+        run(tmp, "log", "JWT secildi", "--why", "stateless",
+            "--dropped", "imzali cerez - oturum tablosu gerekiyor")
+        run(tmp, "note", "olcum: dogrulama 40ms")
+        out = run(tmp, "search", "oturum tablosu")
+        assert "JWT secildi" in out, out            # the title came with the match
+        assert "imzali cerez" in out, out
+        assert "Decision Log" in out, out
+        assert "olcum" not in out, out              # and nothing else did
+        assert "Notes" in run(tmp, "search", "40ms")
+        assert "no match" in run(tmp, "search", "boyle-bir-sey-yok")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_backlog_tags_are_exact_and_never_guessed():
     tmp = Path(tempfile.mkdtemp())
     try:

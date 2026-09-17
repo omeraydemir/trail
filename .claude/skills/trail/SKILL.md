@@ -1,7 +1,7 @@
 ---
 name: trail
 description: Repo-local task ledger driven by the `trail` CLI — markdown task files in `.trail/tasks/` that carry work across sessions, and whose decision log records what was rejected and why. Use when work will span sessions, when a design decision with a rejected alternative is made, when resuming or handing off work, when closing a task, or when a backlog, spec, or brain dump needs breaking into tasks. Not for single-prompt work.
-argument-hint: <slug> | status | plan <file|notes> | start <slug> [T1|T2] | log <decision> --why <why> --dropped <alt> | note <finding> | write <section> | link <path> | backlog <item> | set <field> <value> | handoff | done | ls
+argument-hint: <slug> | status | plan <file|notes> | start <slug> [T1|T2] | log <decision> --why <why> --dropped <alt> | note <finding> | write <section> | link <path> | backlog <item> | set <field> <value> | handoff | done | ls | search <text>
 ---
 
 # trail
@@ -77,6 +77,13 @@ session, for detail you almost never need. So climb:
 | to edit a section by hand | read the file | the file |
 | where a task you are *not* on stands | `trail status --task <slug>` | ~15 lines |
 | which tasks exist, in what shape | `trail ls`, `trail board` — both narrow to the active task's group; `--all` or `--group <g>` to widen | a few lines |
+| whether something was already decided, tried or rejected | `trail search <text>` — every task, the archive included | the matching entries |
+
+Search with `trail search`, not with `rg`: this format's unit is an entry, not a
+line. A decision's `why:` and `dropped:` are indented under a title line, so a
+line-based match hands you the rejected alternative without the decision it belongs
+to — and "have we already ruled this out?" is the question the decision log exists to
+answer.
 
 `status` prints decision **titles** only; a title plus `--full` on demand is the
 difference between a 15-line session start and a 4,000-character one. It ends with a

@@ -945,6 +945,57 @@ def cmd_show(args) -> int:
     return 0
 
 
+SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
+
+
+def search_units(text: str):
+    """(heading, [lines]) per searchable unit. The decision log's unit is the whole
+    entry: `why:` and `dropped:` are indented under a title line, so a line-based
+    match - what `rg` gives you - reports the rejected alternative without the
+    decision it belongs to. Every other section is one line per item. Headings are
+    read off the file rather than hardcoded; task files are editable by hand and the
+    template is configurable."""
+    for m in SECTION_RE.finditer(text):
+        head = m.group(1)
+        if head == "Decision Log":
+            for title, body in decision_entries(text):
+                yield head, [title] + body
+        else:
+            for line in get_section(text, head).splitlines():
+                if line.strip():
+                    yield head, [line]
+
+
+def cmd_search(args) -> int:
+    root = find_root()
+    cfg = load_config(root)
+    q = args.query.lower()
+    # the archive is searched too: "did we already reject this?" is exactly the
+    # question a closed task answers, and a default that hides it answers it wrong
+    tasks = sorted(load_tasks(root, cfg, archived=True), key=lambda t: t["id"])
+    hits = seen = 0
+    for t in tasks:
+        found = [(h, lines) for h, lines in search_units(t["text"])
+                 if q in "\n".join(lines).lower()]
+        if not found:
+            continue
+        seen += 1
+        hits += len(found)
+        where = "%s%s" % (t["status"], ", archived" if t["archived"] else "")
+        for head, lines in found:
+            print("%s %s %s" % (c(t["id"], "id"), c("(%s)" % where, t["status"]),
+                                c("· " + head, "dim")))
+            for line in lines:
+                print("  " + line)
+            print("")
+    if not hits:
+        print("no match for %r" % args.query)
+        return 0
+    print(c("%d hit%s in %d task%s"
+            % (hits, "" if hits == 1 else "s", seen, "" if seen == 1 else "s"), "dim"))
+    return 0
+
+
 def cmd_status(args) -> int:
     root = find_root()
     cfg = load_config(root)
@@ -1141,6 +1192,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task", nargs="?")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("search", help="find a decision, note or plan item by text")
+    s.add_argument("query")
+    s.set_defaults(fn=cmd_search)
 
     s = sub.add_parser("status", help="what is in progress + nudges")
     s.add_argument("--task", help="one task by slug, whatever its status")
