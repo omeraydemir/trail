@@ -4,16 +4,16 @@
 Single file, standard library only, Python 3.9+.
 The point is not the task list; it is the decision log inside each task.
 """
-from __future__ import annotations
-
 import argparse
 import contextlib
 import json
 import os
+import random
 import re
 import shutil
-import subprocess
 import sys
+import unicodedata
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
@@ -34,12 +34,16 @@ INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 # Where each agent reads project skills from. Claude Code does NOT read
 # .agents/skills/; the others do. Verified against the vendors' docs, not guessed.
-AGENT_SKILL_PATHS = {
-    "claude": ".claude/skills/trail/SKILL.md",
-    "codex": ".agents/skills/trail/SKILL.md",
-    "cursor": ".agents/skills/trail/SKILL.md",
-    "gemini": ".agents/skills/trail/SKILL.md",
+AGENT_SKILL_DIRS = {
+    "claude": ".claude/skills",
+    "codex": ".agents/skills",
+    "cursor": ".agents/skills",
+    "gemini": ".agents/skills",
 }
+# Two entry points, split by what the user is doing rather than by what the model
+# infers: `/trail` resumes and works, `/trail-plan` turns a document into tasks.
+# Each file is complete for its own scenario, so a session loads one of them.
+SKILLS = ("trail", "trail-plan")
 AGENT_MARKERS = {
     "claude": ".claude",
     "codex": ".codex",
@@ -65,6 +69,11 @@ DEFAULTS = {
 
 class TrailError(Exception):
     pass
+
+
+class Unchanged(Exception):
+    """The requested end state already holds. Not an error, and nothing is
+    written - raised from inside a mutation so the write never happens."""
 
 
 # --------------------------------------------------------------------------
@@ -241,40 +250,557 @@ def append_section(text: str, heading: str, line: str, create: bool = False) -> 
     return set_section(text, heading, body, create=create)
 
 
-CHECKBOX_RE = re.compile(r"^\s*-\s+\[(.)\]", re.M)
+CHECKBOX_RE = re.compile(r"^\s*-\s+\[(.)\]", re.M)   # backlog lines; plan items go through parse_plan
 
+
+def bullet_entries(text: str, heading: str) -> list:
+    """[(title, [body lines])] for a section written as dated bullets. An entry is
+    a top-level `- ` bullet with its indented lines under it, so the title alone is
+    printable; a free-form line before any bullet is an entry of its own, since a
+    section with no rules must not have invisible content."""
+    out = []
+    for line in get_section(text, heading).splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("- ") or not out:
+            out.append((line, []))
+        else:
+            out[-1][1].append(line)
+    return out
+
+
+def decision_entries(text: str) -> list:
+    """The decision log's `why:` and `dropped:` sit indented under a title line."""
+    return bullet_entries(text, "Decision Log")
+
+
+def render_decision(title: str, why, dropped, today: str) -> str:
+    """One scannable title line, the reasons as sub-bullets. A reason spanning
+    several lines continues indented under its label, which is how the reader
+    (`decision_entries`) already groups an entry; blank lines inside a reason are
+    dropped, an entry is a block, not an essay."""
+    lines = ["- **%s** · %s" % (today, title.strip())]
+    for label, body in (("why", why), ("dropped", dropped)):
+        rows = [r.rstrip() for r in (body or "").strip().splitlines() if r.strip()]
+        if rows:
+            lines.append("  - **%s:** %s" % (label, rows[0]))
+            lines.extend("    " + r for r in rows[1:])
+    return "\n".join(lines)
+
+
+LOG_LABELS = ("why", "dropped")
+
+
+def parse_log_stdin(raw: str) -> dict:
+    """The stdin form of `trail log`: a line that is exactly `--why` or `--dropped`
+    opens that field, everything up to the next label is its body. The labels are
+    the flags themselves, so there is nothing new to learn and no prose line looks
+    like one. Text before the first label, a label given twice, or no label at all
+    is refused - the split has to be deterministic, never guessed."""
+    fields, current = {}, None
+    for line in raw.splitlines():
+        key = line.strip()
+        if key.startswith("--") and key[2:] in LOG_LABELS:
+            key = key[2:]
+            if key in fields:
+                raise TrailError("stdin: --%s appears twice" % key)
+            fields[key] = []
+            current = key
+            continue
+        if current is None:
+            if line.strip():
+                raise TrailError("stdin must start with a --why or --dropped line, "
+                                 "not with %r" % line.strip()[:40])
+            continue
+        fields[current].append(line)
+    if not fields:
+        raise TrailError("stdin: no --why or --dropped line found, nothing to log from it")
+    out = {k: "\n".join(v).strip() for k, v in fields.items()}
+    for k, v in out.items():
+        if not v:
+            raise TrailError("stdin: --%s has an empty body" % k)
+    return out
+
+
+# --------------------------------------------------------------------------
+# plan items - the one part of the Markdown trail parses instead of passing through
+#
+#   - [/] classify ErrorCode [id:: ap-k4m2] [blocked:: 2026-09-15] [blocked-reason:: no audio file]
+#
+# The box is progress and nothing else. The bracketed fields are Dataview's inline
+# syntax, and the four keys below are the only ones trail owns; they are read from
+# anywhere on the line and written back after the text, in the order they already
+# had. Everything else - a wikilink, a `[priority:: high]`, a comment - is text and
+# comes back byte for byte. A line that is not a plan item is never touched, and a
+# fenced code block is opaque whatever it contains.
+# --------------------------------------------------------------------------
+
+PLAN_STATES = {" ": "not started", "/": "written, not verified",
+               "x": "verified", "-": "cancelled"}
+RESOLVED = ("x", "-")
+TRAIL_FIELDS = ("id", "completion", "blocked", "blocked-reason")
+ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+ITEM_ID_RE = re.compile(r"^[a-z0-9]+-[a-z0-9]{4}$")
+# a checkbox is followed by whitespace or the end of the line: `- [x](url)` is a link
+PLAN_LINE_RE = re.compile(r"^([ \t]*)-[ \t]+\[(.)\](?:[ \t]+(.*)|[ \t]*)$")
+INLINE_FIELD_RE = re.compile(r"[ \t]*\[([A-Za-z][A-Za-z0-9_-]*)::[ \t]*([^\]]*)\]")
+FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
+CODE_SPAN_RE = re.compile(r"`[^`]*`")
+ORDERED_TRAP_RE = re.compile(r"^\d+[.)](\s|$)")
+FOREIGN_BOX_RE = re.compile(r"^[ \t]*[*+][ \t]+\[.\](?:[ \t]|$)")
+
+
+# real annotations, not `from __future__ import annotations`: dataclasses resolves
+# string ones through sys.modules, and the test loader never registers this file
+@dataclass
+class PlanItem:
+    line_no: int              # 1-based, in the file
+    indent: str
+    state: str                # one character; `X` reads as `x`
+    text: str                 # the line minus its box and trail's fields
+    fields: dict              # trail's fields, in file order
+    raw: str                  # the line as read; written back unless dirty
+    dupes: list = field(default_factory=list)   # trail keys that appear twice
+    dirty: bool = False
+
+    @property
+    def id(self) -> str:
+        return self.fields.get("id", "")
+
+    @property
+    def resolved(self) -> bool:
+        return self.state in RESOLVED
+
+    @property
+    def blocked(self) -> bool:
+        return "blocked" in self.fields or "blocked-reason" in self.fields
+
+    def render(self) -> str:
+        parts = [self.text] if self.text else []
+        parts += ["[%s:: %s]" % (k, v) for k, v in self.fields.items()]
+        return ("%s- [%s] %s" % (self.indent, self.state, " ".join(parts))).rstrip()
+
+
+def parse_plan_line(line: str, line_no: int = 0):
+    m = PLAN_LINE_RE.match(line)
+    if not m:
+        return None
+    indent, state, rest = m.group(1), m.group(2), m.group(3) or ""
+    fields, dupes = {}, []
+    # inline code is opaque like a fenced block: a plan item *about* the format
+    # says `[completion:: YYYY-MM-DD]` in backticks, and that is text, not a field
+    code = [(c.start(), c.end()) for c in CODE_SPAN_RE.finditer(rest)]
+
+    def take(fm):
+        key = fm.group(1).lower()
+        if key not in TRAIL_FIELDS or any(a <= fm.start(1) < b for a, b in code):
+            return fm.group(0)          # not ours, or quoted: stays in the text, untouched
+        if key in fields:
+            dupes.append(key)
+        else:
+            fields[key] = fm.group(2).strip()
+        return ""
+
+    text = INLINE_FIELD_RE.sub(take, rest).strip()
+    return PlanItem(line_no, indent, "x" if state == "X" else state, text, fields, line, dupes)
+
+
+def plan_lines(text: str):
+    """(first line number, [lines]) of the `## Plan` body, or None. Both the parser
+    and the writer walk this so their line numbers agree."""
+    b = section_bounds(text, "Plan")
+    if not b:
+        return None
+    return text.count("\n", 0, b[0]) + 1, text[b[0]:b[1]].splitlines(keepends=True)
+
+
+def parse_plan(text: str) -> list:
+    span = plan_lines(text)
+    if not span:
+        return []
+    base, lines = span
+    items, fenced = [], False
+    for i, line in enumerate(lines):
+        if FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        item = parse_plan_line(line.rstrip("\r\n"), base + i)
+        if item:
+            items.append(item)
+    return items
+
+
+def mutate_plan(text: str, fn) -> str:
+    """parse -> fn(items) -> write back only the items fn marked dirty. Every other
+    byte of the file - the rest of the section included - is returned as it was.
+    Rebuilding the section from the parsed items would drop the template's comment,
+    a `###` sub-heading, a note under an item, and normalise every line it touched;
+    the file is hand-editable, so the CLI has to be a guest in it."""
+    b = section_bounds(text, "Plan")
+    if not b:
+        raise TrailError("no '## Plan' section")
+    items = parse_plan(text)
+    fn(items)
+    dirty = {it.line_no: it for it in items if it.dirty}
+    if not dirty:
+        return text
+    base, lines = plan_lines(text)
+    out = []
+    for i, line in enumerate(lines):
+        it = dirty.get(base + i)
+        if it is None:
+            out.append(line)
+        else:
+            out.append(it.render() + line[len(line.rstrip("\r\n")):])
+    return text[:b[0]] + "".join(out) + text[b[1]:]
+
+
+def touch(item: PlanItem) -> None:
+    """Every mutation goes through here. A line carrying a trail field twice
+    cannot be rendered without losing one of them, so it is refused rather than
+    rewritten; the validator names the line."""
+    if item.dupes:
+        raise TrailError("line %d carries [%s:: ] twice; fix the line by hand before the "
+                         "CLI rewrites it (trail validate lists it)"
+                         % (item.line_no, "], [".join(sorted(set(item.dupes)))))
+    item.dirty = True
+
+
+# --- queries ---------------------------------------------------------------
 
 def plan_progress(text: str):
     """(verified, total) over `## Plan` checkboxes, or None when there are none.
     `[-]` is cancelled: resolved, so it leaves the denominator rather than
     sitting there as work that will never be done."""
-    marks = [m.group(1) for m in CHECKBOX_RE.finditer(get_section(text, "Plan"))]
-    live = [c for c in marks if c != "-"]
+    live = [it for it in parse_plan(text) if it.state != "-"]
     if not live:
         return None
-    return sum(1 for c in live if c in "xX"), len(live)
+    return sum(1 for it in live if it.state == "x"), len(live)
 
 
-def next_plan_item(text: str) -> str:
-    """The first unfinished plan line - the one thing 'where was I' really asks."""
-    for line in get_section(text, "Plan").splitlines():
-        m = CHECKBOX_RE.match(line)
-        if m and m.group(1) not in "xX-":
-            return line.strip()
-    return ""
+def plan_view(items: list) -> dict:
+    """What `status` says about a plan. `next` is the first unresolved item that
+    is not blocked. When it is `[/]` - written, waiting on verification - the first
+    `[ ]` after it is offered as `continue_with`: work that can go on while the
+    verification happens, not a claim that the first item is finished. Blocked
+    items are listed apart and never chosen. `complete` is every item resolved;
+    a blocked item is unresolved, so it holds the plan open."""
+    live = [it for it in items if not it.resolved]
+    open_ = [it for it in live if not it.blocked]
+    nxt = open_[0] if open_ else None
+    cont = None
+    if nxt and nxt.state == "/":
+        cont = next((it for it in open_[1:] if it.state == " "), None)
+    return {"next": nxt, "continue_with": cont,
+            "blocked": [it for it in live if it.blocked],
+            "complete": bool(items) and not live}
 
 
-def decision_entries(text: str) -> list:
-    """[(title, [body lines])]. An entry is a top-level `- ` bullet; its `why:` and
-    `dropped:` are indented under it, so the title alone is printable."""
+def fmt_item(it: PlanItem) -> str:
+    return "[%s] [%s] %s" % (it.id or "no id", it.state, it.text)
+
+
+def fmt_blocked(it: PlanItem) -> str:
+    return "%s · blocked since %s: %s" % (fmt_item(it), it.fields.get("blocked") or "?",
+                                          it.fields.get("blocked-reason") or "(no reason)")
+
+
+def item_dict(it: PlanItem) -> dict:
+    return {"id": it.id, "state": it.state, "text": it.text, "line": it.line_no,
+            "completion": it.fields.get("completion"),
+            "blocked": it.fields.get("blocked"),
+            "blocked_reason": it.fields.get("blocked-reason")}
+
+
+# --- ids -------------------------------------------------------------------
+
+def id_prefix(slug: str) -> str:
+    """Initials of the slug's parts: `user-1-profile` -> `u1p`."""
+    return "".join(p[0] for p in slug.split("-") if p)
+
+
+def new_item_id(prefix: str, taken, rng=random) -> str:
+    while True:
+        cand = "%s-%s" % (prefix, "".join(rng.choice(ID_ALPHABET) for _ in range(4)))
+        if cand not in taken:
+            return cand
+
+
+def check_unique_ids(items: list) -> None:
+    seen = {}
+    for it in items:
+        if it.id and it.id in seen:
+            raise TrailError("duplicate plan id %s on %r and %r - every item needs its own"
+                             % (it.id, seen[it.id], it.text))
+        seen[it.id] = it.text
+
+
+def assign_ids(items: list, prefix: str, rng=random) -> list:
+    """Give every id-less item an id. An id that is there stays, whatever it looks
+    like: once written it never changes, and the validator reports a bad one."""
+    taken = {it.id for it in items if it.id}
+    given = []
+    for it in items:
+        if not it.id:
+            touch(it)
+            it.fields["id"] = new_item_id(prefix, taken, rng)
+            taken.add(it.id)
+            given.append(it)
+    return given
+
+
+def with_plan_ids(body: str, prefix: str):
+    """A plan body about to be written: id-less checkbox lines get ids, nothing
+    else changes. Returns (body, number of ids assigned)."""
+    given = []
+
+    def fn(items):
+        check_unique_ids(items)
+        given.extend(assign_ids(items, prefix))
+
+    head = "## Plan\n"
+    return mutate_plan(head + body + "\n", fn)[len(head):].rstrip("\n"), len(given)
+
+
+# --- mutations -------------------------------------------------------------
+
+def _blocked_note(it: PlanItem) -> str:
+    return "%s: %s" % (it.fields.get("blocked") or "?", it.fields.get("blocked-reason") or "")
+
+
+def transition(it: PlanItem, state: str, today: str, reason: str = None) -> None:
+    """Move an item between the four states. `[x]` is dated on the way in and the
+    date is cleared on the way out. A blocked item can be `[ ]` or `[/]` but not
+    resolved: the CLI never clears a block as a side effect, so `[x]` and `[-]`
+    are refused until `trail unblock`."""
+    if state in RESOLVED and it.blocked:
+        raise TrailError("[%s] is blocked (%s) - unblock it first: trail unblock %s"
+                         % (it.id or "no id", _blocked_note(it), it.id or "<item>"))
+    if it.state == state:
+        if state == "-" and reason:
+            raise TrailError("[%s] is already cancelled: %s. Nothing changed - the reason "
+                             "is part of the text, edit the line to change it"
+                             % (it.id or "no id", it.text))
+        extra = (" (completion %s)" % it.fields["completion"]
+                 if state == "x" and it.fields.get("completion") else "")
+        raise Unchanged("[%s] is already [%s]%s; nothing changed" % (it.id or "no id", state, extra))
+    touch(it)
+    it.state = state
+    if state == "x":
+        it.fields["completion"] = today
+    else:
+        it.fields.pop("completion", None)
+    if state == "-" and reason:
+        it.text = "%s — %s" % (it.text, reason.strip())
+
+
+def clean_reason(reason: str, what: str) -> str:
+    reason = (reason or "").strip()
+    if not reason:
+        raise TrailError("%s needs a reason" % what)
+    if "\n" in reason or "]" in reason:
+        raise TrailError("%s reason must be one line and cannot contain ']' "
+                         "(it is written as an inline field)" % what)
+    return reason
+
+
+def set_blocked(it: PlanItem, today: str, reason: str) -> None:
+    if it.resolved:
+        raise TrailError("[%s] is [%s] (%s); only an unfinished item can be blocked"
+                         % (it.id or "no id", it.state, PLAN_STATES[it.state]))
+    if it.blocked:
+        raise TrailError("[%s] is already blocked (%s); nothing changed.\n"
+                         "       To replace the reason: trail unblock %s && trail block %s \"<reason>\""
+                         % (it.id or "no id", _blocked_note(it), it.id or "<item>", it.id or "<item>"))
+    touch(it)
+    it.fields["blocked"] = today
+    it.fields["blocked-reason"] = reason
+
+
+def clear_blocked(it: PlanItem) -> str:
+    """Remove the two blocked fields and nothing else; the box is not touched."""
+    if not it.blocked:
+        raise Unchanged("[%s] is not blocked; nothing changed" % (it.id or "no id"))
+    was = _blocked_note(it)
+    touch(it)
+    it.fields.pop("blocked", None)
+    it.fields.pop("blocked-reason", None)
+    return was
+
+
+# --- resolution ------------------------------------------------------------
+
+def fmt_items(items: list) -> str:
+    return "\n".join("  " + fmt_item(it) for it in items)
+
+
+def resolve_item(items: list, query: str) -> PlanItem:
+    """Exact id first, then a case-insensitive substring of the text. One hit is
+    the item; zero or several is refused with the candidates listed by id, and
+    nothing is written - picking one would be a guess dressed as a command."""
+    q = (query or "").strip()
+    if not q:
+        raise TrailError("which item? pass an id or a piece of its text")
+    if not items:
+        raise TrailError("the plan has no items")
+    hits = [it for it in items if it.id and it.id == q.lower()]
+    if len(hits) != 1:
+        hits = hits or [it for it in items if q.casefold() in it.text.casefold()]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise TrailError("no plan item matches %r. The plan:\n%s" % (query, fmt_items(items)))
+    raise TrailError("%d plan items match %r - say which, by id:\n%s"
+                     % (len(hits), query, fmt_items(hits)))
+
+
+# --- validation ------------------------------------------------------------
+
+REQUIRED_SECTIONS = ("Goal", "Plan", "Out of Scope", "Status", "Notes",
+                     "Decision Log", "Open Questions")
+REQUIRED_FIELDS = ("id", "title", "level", "status")
+
+
+def is_date(s) -> bool:
+    try:
+        return isinstance(s, str) and len(s) == 10 and date.fromisoformat(s) is not None
+    except ValueError:
+        return False
+
+
+def validate_task(text: str, stem: str) -> list:
+    """[(line, problem, fix)] against trail's own contract - frontmatter, the
+    sections, the plan items and their fields. Not a Markdown linter: `## Notes`
+    has no rules, the decision log and the backlog are not checked, and anything
+    the CLI does not read is not its business. Nothing is repaired."""
     out = []
-    for line in get_section(text, "Decision Log").splitlines():
-        if not line.strip():
-            continue
-        if line.startswith("- "):
-            out.append((line, []))
-        elif out:
-            out[-1][1].append(line)
+
+    def add(line, problem, fix):
+        out.append((line, problem, fix))
+
+    def line_of(offset):
+        return text.count("\n", 0, offset) + 1
+
+    # frontmatter
+    b = fm_bounds(text)
+    if not b:
+        add(1, "no frontmatter block (--- ... ---) at the top",
+            "start the file with the block from .trail/_template.md")
+        fm = {}
+    else:
+        block = text[b[0]:b[1]]
+        fm = parse_yaml(block)
+        where, raw = {}, {}
+        for i, ln in enumerate(block.splitlines()):
+            m = _KEY_RE.match(ln)
+            if m and m.group(1) not in where:
+                where[m.group(1)], raw[m.group(1)] = i + 2, m.group(2).strip()
+
+        def val(key):
+            v = fm.get(key)
+            return v if isinstance(v, str) and v else ""
+
+        for key in REQUIRED_FIELDS:
+            if not val(key):
+                add(where.get(key, 1), "frontmatter: `%s` is missing or empty" % key,
+                    "trail set %s <value> --task %s" % (key, stem) if key != "id"
+                    else "set `id: %s` (the file name)" % stem)
+        if val("id") and val("id") != stem:
+            add(where["id"], "id %r does not match the file name %r" % (val("id"), stem),
+                "rename the file or fix `id:`; readers show one, commands accept both")
+        if val("title") and raw["title"][:1] not in "\"'" and (
+                ": " in raw["title"] or raw["title"].endswith(":")
+                or raw["title"][:1] in "[{&*!|>%@`"):
+            add(where["title"], "title is not quoted and is not valid YAML for other tools",
+                "trail set title \"<title>\" --task %s (writes it quoted)" % stem)
+        if val("level") and val("level").upper() not in ("T1", "T2"):
+            add(where["level"], "level %r is not T1 or T2" % val("level"),
+                "trail set level T1|T2 --task %s" % stem)
+        if val("status") and val("status") not in STATUSES:
+            add(where["status"], "status %r is not one of %s" % (val("status"), ", ".join(STATUSES)),
+                "trail set status open|active|blocked --task %s (done is `trail done`)" % stem)
+        if val("started") and not is_date(val("started")):
+            add(where["started"], "started %r is not a YYYY-MM-DD date" % val("started"),
+                "write the date as YYYY-MM-DD")
+        if "links" in fm and not isinstance(fm["links"], list):
+            add(where["links"], "links is not a list",
+                "one `  - path` line per link; `trail link <path>` writes the shape")
+
+    # sections
+    for head in REQUIRED_SECTIONS:
+        found = list(re.finditer(r"^##\s+" + re.escape(head) + r"\s*$", text, re.M))
+        if not found:
+            add(len(text.splitlines()) or 1, "missing `## %s` section" % head,
+                "add the heading; the order in _template.md is %s" % " > ".join(REQUIRED_SECTIONS))
+        for m in found[1:]:
+            add(line_of(m.start()), "`## %s` appears more than once; the CLI reads the first" % head,
+                "merge the sections")
+
+    # plan items
+    span = plan_lines(text)
+    if span:
+        base, lines = span
+        fenced = False
+        for i, ln in enumerate(lines):
+            if FENCE_RE.match(ln):
+                fenced = not fenced
+            elif not fenced and FOREIGN_BOX_RE.match(ln):
+                add(base + i, "checkbox with a `*`/`+` bullet is not a plan item to trail",
+                    "write the bullet as `-`")
+    items = parse_plan(text)
+    seen = {}
+    for it in items:
+        n = it.line_no
+        f = it.fields
+        if it.state not in PLAN_STATES:
+            add(n, "unknown checkbox state [%s]" % it.state,
+                "use [ ] not started, [/] written not verified, [x] verified, [-] cancelled")
+        if not it.text:
+            add(n, "plan item has no text", "write what the item is, or delete the line")
+        elif ORDERED_TRAP_RE.match(it.text):
+            add(n, "`%s` after the box starts an ordered list and breaks the checkbox"
+                % it.text.split()[0], "number it as text: `- [ ] **1.** ...`")
+        for key in sorted(set(it.dupes)):
+            add(n, "[%s:: ] appears twice on the line" % key, "keep one")
+        for key, v in f.items():
+            if not v:
+                add(n, "[%s:: ] is empty" % key, "give it a value or remove the field")
+        if not it.id:
+            add(n, "plan item has no [id:: ]",
+                "`trail write plan` assigns ids to lines without one (re-pipe the section); "
+                "do not invent ids by hand")
+        elif not ITEM_ID_RE.match(it.id):
+            add(n, "[id:: %s] is not a trail id (<initials>-<4 chars>)" % it.id,
+                "remove the field and let `trail write plan` assign one")
+        elif it.id in seen:
+            add(n, "duplicate id %s (also on line %d)" % (it.id, seen[it.id]),
+                "remove the field on one of them and re-run `trail write plan`")
+        else:
+            seen[it.id] = n
+        comp = f.get("completion")
+        if it.state == "x" and not comp:
+            add(n, "[x] has no [completion:: ] date",
+                "trail uncheck <id> && trail check <id> re-dates it, or add [completion:: YYYY-MM-DD]")
+        if it.state != "x" and comp is not None:
+            add(n, "[completion:: ] on a [%s] item" % it.state,
+                "trail check <id> --partial or trail uncheck <id> clears it, or remove the field")
+        if comp and not is_date(comp):
+            add(n, "[completion:: %s] is not a YYYY-MM-DD date" % comp, "write it as YYYY-MM-DD")
+        blk, why = f.get("blocked"), f.get("blocked-reason")
+        if blk is not None and why is None:
+            add(n, "[blocked:: ] without [blocked-reason:: ]",
+                "trail unblock <id> clears it; trail block <id> \"<reason>\" sets both")
+        if why is not None and blk is None:
+            add(n, "[blocked-reason:: ] without [blocked:: ]",
+                "trail unblock <id> clears it; trail block <id> \"<reason>\" sets both")
+        if blk and not is_date(blk):
+            add(n, "[blocked:: %s] is not a YYYY-MM-DD date" % blk, "write it as YYYY-MM-DD")
+        if it.blocked and it.resolved:
+            add(n, "blocked and [%s] at once - a resolved item cannot be waiting" % it.state,
+                "trail unblock <id>, or trail uncheck <id> if it is not actually resolved")
+    out.sort(key=lambda x: x[0])
     return out
 
 
@@ -394,32 +920,6 @@ def resolve_task(tasks: list, ident: str = None, optional: bool = False):
                      "(or 'trail start <slug>'), or pass --task.")
 
 
-# --------------------------------------------------------------------------
-# git signal: did code change more recently than the task file?
-# --------------------------------------------------------------------------
-
-def code_newer_than(root: Path, ts: float) -> bool:
-    try:
-        r = subprocess.run(
-            ["git", "-C", str(root), "diff", "--name-only", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode != 0:
-            return False
-        names = [n.strip() for n in r.stdout.splitlines() if n.strip()]
-    except Exception:
-        return False
-    for n in names:
-        if n.startswith(".trail/"):
-            continue
-        try:
-            if (root / n).stat().st_mtime > ts:
-                return True
-        except OSError:
-            continue
-    return False
-
-
 def missing_scaffold(root: Path, cfg: dict) -> list:
     """Files `init` would create that this repo does not have. A repo initialised by
     an older trail is not broken - both files are also created lazily on first write -
@@ -428,6 +928,9 @@ def missing_scaffold(root: Path, cfg: dict) -> list:
 
 
 def nudges(root: Path, cfg: dict, tasks: list) -> list:
+    """Derived from the ledger on disk, never from git: trail does not read commit
+    history or the working tree, so a nudge is only ever about what the task file
+    itself says."""
     out = []
     active = [t for t in tasks if t["status"] == "active"]
     if len(active) > 1:
@@ -441,10 +944,17 @@ def nudges(root: Path, cfg: dict, tasks: list) -> list:
         age = age_days(t["mtime"])
         if age >= cfg["stale_days"]:
             out.append("%s: untouched for %s days. Still active? Close it or carry on." % (t["id"], age))
-        elif code_newer_than(root, t["mtime"]):
-            out.append("%s: code moved, the file did not. If a decision was made, "
-                       "'trail log'; if it was a finding, 'trail note'; if neither, "
-                       "ignore this." % t["id"])
+        # the plan says nothing is left, the status says work is on: one of them is
+        # stale, and only a person knows which
+        if t["status"] == "active" and plan_view(parse_plan(t["text"]))["complete"]:
+            out.append("%s: every plan item is resolved but the task is still active. "
+                       "'trail done' closes it; if work remains, add it to the plan."
+                       % t["id"])
+        problems = validate_task(t["text"], t["path"].stem)
+        if problems:
+            out.append("%s: %d format problem%s in the task file - 'trail validate --task %s' "
+                       "lists them" % (t["id"], len(problems), "" if len(problems) == 1 else "s",
+                                       t["id"]))
     return out
 
 
@@ -508,12 +1018,13 @@ def cmd_init(args) -> int:
     if not args.agent and (root / ".agents" / "skills").is_dir():
         agents.append("codex")   # any of codex/cursor/gemini resolves to .agents/skills
     if "all" in agents:
-        agents = list(AGENT_SKILL_PATHS)
+        agents = list(AGENT_SKILL_DIRS)
     if not agents:
         agents = ["claude"]
-    src = INSTALL_ROOT / "skills" / "trail" / "SKILL.md"
-    for dest in sorted({AGENT_SKILL_PATHS[a] for a in agents}):
-        copy(src, root / dest, shipped=True)
+    for skills_dir in sorted({AGENT_SKILL_DIRS[a] for a in agents}):
+        for name in SKILLS:
+            copy(INSTALL_ROOT / "skills" / name / "SKILL.md",
+                 root / skills_dir / name / "SKILL.md", shipped=True)
 
     ign = root / ".trail" / ".gitignore"
     if not ign.exists():
@@ -539,7 +1050,15 @@ def cmd_init(args) -> int:
     return 0
 
 
+# Turkish letters by table, before lowercasing: `İ`.lower() is `i` plus a combining
+# dot, and `ı` has nothing for NFKD to decompose. Every other accent goes through
+# NFKD and loses its marks. Only new slugs are affected; an id never changes.
+TURKISH_ASCII = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
+
+
 def slugify(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s.translate(TURKISH_ASCII))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = s.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-")
@@ -705,9 +1224,14 @@ def cmd_write(args) -> int:
     heading = SECTIONS.get(key) or canonical.get(key)
     if not heading:
         raise TrailError("section must be one of: %s" % ", ".join(sorted(set(SECTIONS.values()))))
+    given = 0
+    if heading == "Plan":   # the one section with structure: id-less items get ids
+        body, given = with_plan_ids(body, id_prefix(task["id"]))
     update_task(root, task, lambda txt: set_section(txt, heading, body, create=True))
     n = len(body.splitlines())
-    print("%s: ## %s written (%d line%s)" % (task["id"], heading, n, "" if n == 1 else "s"))
+    print("%s: ## %s written (%d line%s%s)"
+          % (task["id"], heading, n, "" if n == 1 else "s",
+             (", %d id%s assigned" % (given, "" if given == 1 else "s")) if given else ""))
     return 0
 
 
@@ -715,11 +1239,16 @@ def cmd_log(args) -> int:
     root = find_root()
     cfg = load_config(root)
     task = resolve_task(load_tasks(root, cfg), args.task)
-    entry = "- **%s** · %s" % (date.today().isoformat(), args.text.strip())
-    if args.why:
-        entry += "\n  - **why:** " + args.why.strip()
-    if args.dropped:
-        entry += "\n  - **dropped:** " + args.dropped.strip()
+    fields = {"why": args.why, "dropped": args.dropped}
+    if args.stdin:
+        # a long reason arrives as `--why` / `--dropped` label lines on stdin; the
+        # same field from both sides is a conflict, not a concatenation
+        for key, body in parse_log_stdin(sys.stdin.read()).items():
+            if fields[key] is not None:
+                raise TrailError("--%s given both inline and on stdin; pick one" % key)
+            fields[key] = body
+    entry = render_decision(args.text, fields["why"], fields["dropped"],
+                            date.today().isoformat())
     update_task(root, task,
                 lambda txt: append_section(txt, "Decision Log", entry, create=True))
     print("%s <- %s" % (task["id"], entry.splitlines()[0]))
@@ -748,6 +1277,73 @@ def cmd_handoff(args) -> int:
     return 0
 
 
+def item_command(args, op) -> int:
+    """The one skeleton behind check, uncheck, cancel, block and unblock. The item
+    is resolved and changed inside the lock, on the text re-read there, so the line
+    named a second ago is the line that changes. `op(item, today)` applies one rule
+    from the plan layer and returns the detail for the report; the skeleton only
+    knows how to find an item, give it an id, and say what happened."""
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg), args.task)
+    today = date.today().isoformat()
+    report = []
+
+    def on_items(items):
+        it = resolve_item(items, args.item)
+        old = it.state
+        detail = op(it, today)      # a refusal or a no-op leaves here; nothing is written
+        if not it.id:
+            # the line is rewritten anyway, so an id costs nothing now and lets every
+            # later command name the item. It leads the fields, as `write plan` puts it.
+            touch(it)
+            it.fields = {"id": new_item_id(id_prefix(task["id"]), {x.id for x in items if x.id}),
+                         **it.fields}
+            detail += " · id assigned"
+        moved = (" -> [%s]" % it.state) if it.state != old else ""
+        report.append("%s: [%s] [%s]%s %s · %s" % (task["id"], it.id, old, moved, it.text, detail))
+
+    try:
+        update_task(root, task, lambda txt: mutate_plan(txt, on_items))
+    except Unchanged as e:
+        print("%s: %s" % (task["id"], e))
+        return 0
+    print(report[0])
+    return 0
+
+
+def _set_state(state: str, reason: str = None):
+    def op(it, today):
+        transition(it, state, today, reason)
+        return ("completion %s" % today) if state == "x" else PLAN_STATES[state]
+    return op
+
+
+def cmd_check(args) -> int:
+    return item_command(args, _set_state("/" if args.partial else "x"))
+
+
+def cmd_uncheck(args) -> int:
+    return item_command(args, _set_state(" "))
+
+
+def cmd_cancel(args) -> int:
+    return item_command(args, _set_state("-", args.reason))
+
+
+def cmd_block(args) -> int:
+    reason = clean_reason(args.reason, "block")   # refused before anything is read
+
+    def op(it, today):
+        set_blocked(it, today, reason)
+        return "blocked %s: %s" % (today, reason)
+    return item_command(args, op)
+
+
+def cmd_unblock(args) -> int:
+    return item_command(args, lambda it, today: "unblocked (was %s)" % clear_blocked(it))
+
+
 def cmd_done(args) -> int:
     root = find_root()
     cfg = load_config(root)
@@ -770,14 +1366,19 @@ def cmd_done(args) -> int:
              "y" if len(decision_entries(task["text"])) == 1 else "ies"))
     pr = plan_progress(task["text"])
     if pr:
-        marks = [m.group(1) for m in CHECKBOX_RE.finditer(get_section(task["text"], "Plan"))]
-        rest = [("%d unverified [/]" % marks.count("/")) if "/" in marks else "",
-                ("%d not started [ ]" % marks.count(" ")) if " " in marks else ""]
+        items = parse_plan(task["text"])
+        states = [it.state for it in items]
+        rest = [("%d unverified [/]" % states.count("/")) if "/" in states else "",
+                ("%d not started [ ]" % states.count(" ")) if " " in states else ""]
         rest = [r for r in rest if r]
         print("plan:    %d/%d verified%s"
               % (pr[0], pr[1], (", " + ", ".join(rest)) if rest else ""))
-        if rest:
+        left = [it for it in items if not it.resolved]
+        if left:
+            # by id, so the next command can name them; a blocked one says why
             print(c("           closing with plan items open - deliberate?", "warn"))
+            for it in left:
+                print("             " + (fmt_blocked(it) if it.blocked else fmt_item(it)))
     if open_items or done_items:
         print("backlog: #%s -> %d open, %d done"
               % (task["id"], len(open_items), len(done_items)))
@@ -939,9 +1540,33 @@ def cmd_show(args) -> int:
         d["goal"] = get_section(task["text"], "Goal")
         d["status_note"] = get_section(task["text"], "Status")
         d["decisions"] = [l for l in get_section(task["text"], "Decision Log").splitlines() if l.strip()]
+        d["plan"] = [item_dict(it) for it in parse_plan(task["text"])]
         print(json.dumps(d, ensure_ascii=False, indent=2))
         return 0
     sys.stdout.write(task["text"])
+    return 0
+
+
+def cmd_notes(args) -> int:
+    """The rung between `status` and `show`: the last few findings, whole, and
+    nothing else from the file."""
+    root = find_root()
+    cfg = load_config(root)
+    task = resolve_task(load_tasks(root, cfg, archived=True), args.task)
+    if args.n < 1:
+        raise TrailError("-n takes a positive number")
+    entries = bullet_entries(task["text"], "Notes")
+    if not entries:
+        print("%s: no notes" % task["id"])
+        return 0
+    shown = entries if args.all else entries[-args.n:]
+    if len(shown) < len(entries):
+        print("%s: last %d of %d notes (trail notes --all)"
+              % (task["id"], len(shown), len(entries)))
+    for title, body in shown:
+        print(title)
+        for line in body:
+            print(line)
     return 0
 
 
@@ -996,6 +1621,35 @@ def cmd_search(args) -> int:
     return 0
 
 
+def cmd_validate(args) -> int:
+    """Every task file, or one. Each finding is an error and nothing is repaired:
+    the file is hand-editable, and a repair would be a guess about which side of
+    a contradiction is the right one."""
+    root = find_root()
+    cfg = load_config(root)
+    tasks = sorted(load_tasks(root, cfg), key=lambda t: t["id"])
+    if args.task:
+        tasks = [resolve_task(tasks, args.task)]
+    bad = found = 0
+    for t in tasks:
+        problems = validate_task(t["text"], t["path"].stem)
+        if not problems:
+            continue
+        bad += 1
+        found += len(problems)
+        print(t["path"].relative_to(root))
+        for line, problem, fix in problems:
+            head = "  line %d: " % line
+            print(head + problem)
+            print(" " * len(head) + "fix: " + fix)
+    files = "%d task file%s" % (len(tasks), "" if len(tasks) == 1 else "s")
+    if found:
+        print("%d problem%s in %d of %s" % (found, "" if found == 1 else "s", bad, files))
+        return 1
+    print("ok: %s valid" % files)
+    return 0
+
+
 def cmd_status(args) -> int:
     root = find_root()
     cfg = load_config(root)
@@ -1012,7 +1666,8 @@ def cmd_status(args) -> int:
     if args.json:
         print(json.dumps({
             "root": str(root),
-            "tasks": [_as_dict(t) for t in live],
+            "tasks": [dict(_as_dict(t), plan=[item_dict(it) for it in parse_plan(t["text"])])
+                      for t in live],
             "backlog_items": n_backlog,
             "nudges": ns,
         }, ensure_ascii=False, indent=2))
@@ -1031,12 +1686,23 @@ def cmd_status(args) -> int:
         goal = get_section(t["text"], "Goal")
         if goal:
             blocks.append(lab("Goal:") + " " + goal.replace("\n", " "))
-        pr = plan_progress(t["text"])
-        if pr:
-            blocks.append(lab("Plan:") + " %d/%d verified" % pr)
-            nxt = next_plan_item(t["text"])
-            if nxt:
-                blocks.append(lab("Next:") + " " + nxt)
+        items = parse_plan(t["text"])
+        if items:
+            pr = plan_progress(t["text"])
+            if pr:
+                blocks.append(lab("Plan:") + " %d/%d verified" % pr)
+            view = plan_view(items)
+            if view["next"]:
+                blocks.append(lab("Next:") + "\n  " + fmt_item(view["next"]))
+                if view["continue_with"]:
+                    blocks.append(lab("Can continue with:") + "\n  " + fmt_item(view["continue_with"]))
+            elif view["blocked"]:
+                blocks.append(lab("Next:") + " none - every remaining item is blocked")
+            else:
+                blocks.append(lab("Next:") + " none - every plan item is resolved")
+            if view["blocked"]:
+                blocks.append(lab("Blocked:") + "\n"
+                              + "\n".join("  " + fmt_blocked(it) for it in view["blocked"]))
         st = get_section(t["text"], "Status")
         if st:
             blocks.append(lab("Status:") + " " + st.replace("\n", " "))
@@ -1067,10 +1733,12 @@ def cmd_status(args) -> int:
             bullets = [l for l in body.splitlines() if l.strip().startswith("- ")]
             return bullets or [l for l in body.splitlines() if l.strip()]
         inv = []
-        for sec in ("Notes", "Open Questions"):
-            n = len(entries(sec))
-            if n:
-                inv.append("%s %d" % (sec, n))
+        n = len(bullet_entries(t["text"], "Notes"))   # the count `trail notes` will confirm
+        if n:
+            inv.append("Notes %d (trail notes)" % n)
+        n = len(entries("Open Questions"))
+        if n:
+            inv.append("Open Questions %d" % n)
         if len(dec) > 5:
             inv.append("Decisions %d (last 5 above)" % len(dec))
         if inv:
@@ -1115,7 +1783,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true",
                    help="overwrite a SKILL.md that has drifted from the installed copy")
     s.add_argument("--agent", action="append",
-                   choices=sorted(AGENT_SKILL_PATHS) + ["all"],
+                   choices=sorted(AGENT_SKILL_DIRS) + ["all"],
                    help="where to write SKILL.md (default: detect the agents this repo uses)")
     s.set_defaults(fn=cmd_init)
 
@@ -1155,6 +1823,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("text")
     s.add_argument("--why")
     s.add_argument("--dropped")
+    s.add_argument("--stdin", action="store_true",
+                   help="read the reasons from stdin: a `--why` or `--dropped` line, then its body")
     s.add_argument("--task")
     s.set_defaults(fn=cmd_log)
 
@@ -1167,6 +1837,34 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("text")
     s.add_argument("--task")
     s.set_defaults(fn=cmd_handoff)
+
+    s = sub.add_parser("check", help="plan item -> [x] verified, dated today")
+    s.add_argument("item", help="an id, or a piece of the item's text")
+    s.add_argument("--partial", action="store_true", help="-> [/] written, not verified")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("uncheck", help="plan item -> [ ] not started")
+    s.add_argument("item", help="an id, or a piece of the item's text")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_uncheck)
+
+    s = sub.add_parser("cancel", help="plan item -> [-] cancelled")
+    s.add_argument("item", help="an id, or a piece of the item's text")
+    s.add_argument("reason", nargs="?", help="appended to the item's text")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_cancel)
+
+    s = sub.add_parser("block", help="mark a plan item as waiting; the box is not touched")
+    s.add_argument("item", help="an id, or a piece of the item's text")
+    s.add_argument("reason", help="one line, written as [blocked-reason:: ...]")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_block)
+
+    s = sub.add_parser("unblock", help="clear a plan item's block; the box is not touched")
+    s.add_argument("item", help="an id, or a piece of the item's text")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_unblock)
 
     s = sub.add_parser("done", help="close a task and report what is around it")
     s.add_argument("--task")
@@ -1193,9 +1891,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_show)
 
+    s = sub.add_parser("notes", help="the last few ## Notes entries, whole")
+    s.add_argument("-n", type=int, default=5, metavar="N", help="how many (default 5)")
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--task")
+    s.set_defaults(fn=cmd_notes)
+
     s = sub.add_parser("search", help="find a decision, note or plan item by text")
     s.add_argument("query")
     s.set_defaults(fn=cmd_search)
+
+    s = sub.add_parser("validate", help="check the task files against trail's format")
+    s.add_argument("--task", help="one task instead of every file in the tasks dir")
+    s.set_defaults(fn=cmd_validate)
 
     s = sub.add_parser("status", help="what is in progress + nudges")
     s.add_argument("--task", help="one task by slug, whatever its status")

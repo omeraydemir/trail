@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import date
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -79,13 +80,14 @@ def test_slugify():
 
 
 def test_own_skill_copy_is_in_sync():
-    """This repo dogfoods trail, so it holds two copies of SKILL.md.
-    They must not drift; the source of truth is skills/trail/."""
-    src = HERE / "skills" / "trail" / "SKILL.md"
-    dest = HERE / ".claude" / "skills" / "trail" / "SKILL.md"
-    if dest.exists():
-        assert src.read_text("utf-8") == dest.read_text("utf-8"), \
-            "SKILL.md kopyalari ayrismis: 'trail init --force' ile tazele"
+    """This repo dogfoods trail, so it holds two copies of each SKILL.md.
+    They must not drift; the source of truth is skills/<name>/."""
+    for name in t.SKILLS:
+        src = HERE / "skills" / name / "SKILL.md"
+        dest = HERE / ".claude" / "skills" / name / "SKILL.md"
+        if dest.exists():
+            assert src.read_text("utf-8") == dest.read_text("utf-8"), \
+                "%s SKILL.md kopyalari ayrismis: 'trail init --force' ile tazele" % name
 
 
 def test_missing_scaffold_is_nudged_not_broken():
@@ -106,6 +108,17 @@ def run(cwd, *args, **kw):
                        cwd=str(cwd), capture_output=True, text=True, env=kw.get("env"))
     assert r.returncode == kw.get("code", 0), (args, r.returncode, r.stdout, r.stderr)
     return r.stdout
+
+
+def run_full(cwd, *args, **kw):
+    """run() with the whole result and an `input=` pipe. A refusal is only useful
+    if it says what to do instead, so the message on stderr is the thing under
+    test, not just the exit code."""
+    r = subprocess.run([sys.executable, str(BIN)] + list(args), cwd=str(cwd),
+                       capture_output=True, text=True,
+                       input=kw.get("input"), env=kw.get("env"))
+    assert r.returncode == kw.get("code", 0), (args, r.returncode, r.stdout, r.stderr)
+    return r
 
 
 def test_a_new_session_can_resume_from_the_reading_path_alone():
@@ -137,7 +150,7 @@ def test_a_new_session_can_resume_from_the_reading_path_alone():
         out = run(tmp, "resume", "rapor-2-tablo")
         assert "open -> active" in out                      # it was parked
         assert "Tablo gercek veriyle" in out                # what is this
-        assert "- [ ] sayfa hata yolu" in out               # what is next
+        assert "[ ] sayfa hata yolu" in out                 # what is next
         assert "Pivot MODULE DISI" in out                   # the boundary, not lost
         assert "Notes 1" in out and "Open Questions 1" in out   # findings are visible
         assert "cursor sayfalama" in out                    # last decisions
@@ -336,6 +349,7 @@ def test_end_to_end():
         assert (tmp / ".trail/backlog.md").is_file()
         # no agent markers in a bare repo -> claude is the fallback
         assert (tmp / ".claude/skills/trail/SKILL.md").is_file()
+        assert (tmp / ".claude/skills/trail-plan/SKILL.md").is_file()   # both entry points
         assert not (tmp / ".agents").exists()
 
         tmp2 = Path(tempfile.mkdtemp())
@@ -490,7 +504,7 @@ def test_end_to_end():
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         assert t.plan_progress(f2.read_text("utf-8")) == (1, 3)
-        assert t.next_plan_item(f2.read_text("utf-8")) == "- [/] two"
+        assert t.plan_view(t.parse_plan(f2.read_text("utf-8")))["next"].text == "two"
         assert "1/3" in run(tmp, "ls")
 
         # closing reports the backlog around the task and changes nothing in it
@@ -508,6 +522,781 @@ def test_end_to_end():
                            cwd=str(tmp), input="  \n", capture_output=True, text=True)
         assert r.returncode == 1
         assert t.get_section(f2.read_text("utf-8"), "Goal") == "tek cumle"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the plan line: the only Markdown trail parses instead of passing through
+# --------------------------------------------------------------------------
+
+def test_plan_line_round_trip():
+    """The line is the format. A line the CLI wrote has to survive parse -> render
+    byte for byte, and everything trail does not own - a wikilink, a foreign inline
+    field, an indent - has to come back untouched, or hand-edited plans rot the
+    moment a command runs."""
+    # inline code is opaque, like a fenced block: an item about the format mentions
+    # `[completion:: YYYY-MM-DD]` in backticks, and that must not read as a field
+    it = t.parse_plan_line("- [x] rule: `[completion:: YYYY-MM-DD]` on [x] [id:: a-bbbb] [completion:: 2026-09-12]")
+    assert it.fields == {"id": "a-bbbb", "completion": "2026-09-12"}, it.fields
+    assert it.dupes == [] and it.text == "rule: `[completion:: YYYY-MM-DD]` on [x]", it
+    assert it.render() == "- [x] rule: `[completion:: YYYY-MM-DD]` on [x] [id:: a-bbbb] [completion:: 2026-09-12]"
+
+    line = "- [x] classify ErrorCode [id:: ap-k4m2] [completion:: 2026-09-17]"
+    assert t.parse_plan_line(line, 1).render() == line
+
+    assert t.parse_plan_line("- [X] upper", 1).state == "x"       # `X` reads as `x`
+
+    # trail's fields are read from anywhere on the line and written back after the
+    # text, keeping the order they already had
+    it = t.parse_plan_line(
+        "- [ ] before [completion:: 2026-09-17] middle [id:: ab-1234] after", 1)
+    assert it.text == "before middle after", it.text
+    assert list(it.fields) == ["completion", "id"], it.fields
+    assert it.render() == "- [ ] before middle after [completion:: 2026-09-17] [id:: ab-1234]"
+
+    # not trail's: text, byte for byte
+    src = "- [/] see [[Design Doc]] and [priority:: high] rest [id:: ab-1234]"
+    it = t.parse_plan_line(src, 1)
+    assert it.text == "see [[Design Doc]] and [priority:: high] rest", it.text
+    assert it.render() == src
+
+    assert t.parse_plan_line("* [ ] x", 1) is None              # only `- ` bullets
+    assert t.parse_plan_line("- [x](http://u) x", 1) is None    # a link, not a box
+    sub = t.parse_plan_line("  - [ ] sub", 1)
+    assert sub is not None and sub.indent == "  ", sub
+    assert sub.render() == "  - [ ] sub"
+
+    # a line carrying one of trail's fields twice cannot be rendered without
+    # losing one of them, so every mutation refuses it by name
+    dup = t.parse_plan_line("- [ ] x [id:: a-aaaa] [id:: b-bbbb]", 7)
+    assert dup.dupes == ["id"], dup.dupes
+    try:
+        t.touch(dup)
+        assert False, "touch rewrote a line carrying [id:: ] twice"
+    except t.TrailError as e:
+        assert "twice" in str(e) and "line 7" in str(e), e
+
+
+HAND_EDITED_PLAN = (
+    '---\nid: demo\ntitle: "Demo"\nlevel: T2\nstatus: active\n---\n'
+    "# demo\n"
+    "\n## Plan\n"
+    "<!-- `- [ ]` todo · `- [x]` verified -->\n"
+    "### A. parser\n"
+    "- [ ] alfa [id:: d-aaaa]\n"
+    "  parser notu, madde degil   \n"
+    "  - [ ] nested [id:: d-bbbb]\n"
+    "- [/] beta [priority:: high] [[Design]] [id:: d-cccc]\n"
+    "\n"
+    "```\n"
+    "- [ ] not an item\n"
+    "```\n"
+    "\n## Status\n"
+    "kaldigim yer\n"
+)
+
+
+def test_hand_edited_plan_survives_a_mutation():
+    """Rebuilding `## Plan` from the parsed items would drop the template comment,
+    the `###` sub-heading and the note under an item, and normalise every line it
+    touched. A mutation is allowed to change exactly the one line it changed."""
+    assert [it.text for it in t.parse_plan(HAND_EDITED_PLAN)] == [
+        "alfa", "nested", "beta [priority:: high] [[Design]]"]   # the fence is opaque
+    assert len(t.parse_plan(HAND_EDITED_PLAN.replace("```", "~~~"))) == 3   # ~~~ too
+
+    new = t.mutate_plan(HAND_EDITED_PLAN,
+                        lambda items: t.transition(items[0], "x", "2026-09-17"))
+    old_lines, new_lines = HAND_EDITED_PLAN.splitlines(), new.splitlines()
+    assert len(old_lines) == len(new_lines), (len(old_lines), len(new_lines))
+    diff = [i for i, (o, n) in enumerate(zip(old_lines, new_lines)) if o != n]
+    assert len(diff) == 1, [(old_lines[i], new_lines[i]) for i in diff]
+    assert old_lines[diff[0]] == "- [ ] alfa [id:: d-aaaa]"
+    assert new_lines[diff[0]] == "- [x] alfa [id:: d-aaaa] [completion:: 2026-09-17]"
+    assert "- [ ] not an item" in new                    # never parsed, never changed
+    assert "  parser notu, madde degil   " in new        # prose and its trailing space
+    assert "<!-- `- [ ]` todo · `- [x]` verified -->" in new
+    assert "### A. parser" in new
+    # nothing dirty -> the file is returned, not rewritten
+    assert t.mutate_plan(HAND_EDITED_PLAN, lambda items: None) == HAND_EDITED_PLAN
+
+
+class _FixedRng:
+    """`random.choice` is called once per id character; a fixed cycle makes the
+    collision path testable without seeding the global generator."""
+
+    def __init__(self, seq):
+        self.seq, self.i = list(seq), 0
+
+    def choice(self, alphabet):
+        ch = self.seq[self.i % len(self.seq)]
+        self.i += 1
+        return ch
+
+
+def test_item_ids():
+    """An id is written once and never changes, so everything about making one has
+    to be settled before it lands: the prefix, the Turkish slug it comes from, the
+    collision retry, and the rule that an id already on the line is never touched."""
+    assert t.id_prefix("auth-provider") == "ap"
+    assert t.id_prefix("user-1-profile") == "u1p"
+    # ids come from the slug, and the slug transliterates before lowercasing:
+    # 'İ'.lower() is 'i' plus a combining dot, and 'ı' has nothing to decompose
+    assert t.slugify("Görsel Doğrulama") == "gorsel-dogrulama"
+    assert t.slugify("İSTANBUL ışık") == "istanbul-isik"
+
+    assert t.new_item_id("ap", set(), _FixedRng("aaaabbbb")) == "ap-aaaa"
+    assert t.new_item_id("ap", {"ap-aaaa"}, _FixedRng("aaaabbbb")) == "ap-bbbb"
+
+    items = [t.parse_plan_line("- [ ] bir [id:: keep-me]", 1),
+             t.parse_plan_line("- [ ] iki", 2)]
+    given = t.assign_ids(items, "ap", _FixedRng("cccc"))
+    assert items[0].fields["id"] == "keep-me" and not items[0].dirty   # malformed, kept
+    assert [it.id for it in given] == ["ap-cccc"] and items[1].dirty
+
+    body, n = t.with_plan_ids("- [ ] bir [id:: ap-k4m2]\n- [ ] iki", "ap")
+    assert n == 1
+    lines = body.splitlines()
+    assert lines[0] == "- [ ] bir [id:: ap-k4m2]", lines        # only id-less lines move
+    new_id = t.parse_plan_line(lines[1], 2).id
+    assert new_id.startswith("ap-") and t.ITEM_ID_RE.match(new_id), new_id
+
+    try:
+        t.with_plan_ids("- [ ] bir [id:: ap-k4m2]\n- [ ] iki [id:: ap-k4m2]", "ap")
+        assert False, "a piped plan with two identical ids was accepted"
+    except t.TrailError as e:
+        assert "duplicate plan id ap-k4m2" in str(e), e
+
+
+def _item(line):
+    return t.parse_plan_line(line, 1)
+
+
+def test_transitions_and_blocked_rules():
+    """The box is progress; blocked is a separate fact about the same line. The
+    one rule that ties them is that a blocked item cannot be resolved, because
+    clearing someone's block as a side effect of `check` loses why it was there."""
+    it = _item("- [ ] adim [id:: d-aaaa]")
+    t.transition(it, "x", "2026-09-17")
+    assert it.state == "x" and it.fields["completion"] == "2026-09-17" and it.dirty
+
+    for out_state in ("/", " "):        # the date is cleared on the way out of [x]
+        it = _item("- [x] adim [id:: d-aaaa] [completion:: 2026-09-17]")
+        t.transition(it, out_state, "2026-09-18")
+        assert it.state == out_state and "completion" not in it.fields, it.fields
+
+    it = _item("- [ ] adim [id:: d-aaaa]")
+    t.transition(it, "-", "2026-09-17", "kapsam disi")
+    assert it.text == "adim — kapsam disi", it.text     # the reason is prose, not a field
+    assert "completion" not in it.fields
+
+    for state in ("x", "-"):
+        it = _item("- [/] adim [id:: d-aaaa] [blocked:: 2026-09-15] [blocked-reason:: ses yok]")
+        try:
+            t.transition(it, state, "2026-09-17")
+            assert False, "a blocked item was resolved to [%s]" % state
+        except t.TrailError as e:
+            assert "unblock it first" in str(e), e
+        assert it.state == "/" and not it.dirty
+        assert list(it.fields) == ["id", "blocked", "blocked-reason"], it.fields
+
+    it = _item("- [ ] adim [id:: d-aaaa] [blocked:: 2026-09-15] [blocked-reason:: ses yok]")
+    t.transition(it, "/", "2026-09-17")                 # [/] + blocked is legal
+    assert it.state == "/" and it.blocked
+    it = _item("- [/] adim [id:: d-aaaa] [blocked:: 2026-09-15] [blocked-reason:: ses yok]")
+    t.transition(it, " ", "2026-09-17")
+    assert it.state == " " and it.blocked
+
+    for line in ("- [x] adim [id:: d-aaaa] [completion:: 2026-09-17]",
+                 "- [-] adim [id:: d-aaaa]"):
+        it = _item(line)
+        try:
+            t.set_blocked(it, "2026-09-17", "sebep")
+            assert False, "a resolved item was blocked: %s" % line
+        except t.TrailError as e:
+            assert "only an unfinished item can be blocked" in str(e), e
+        assert not it.blocked and not it.dirty
+
+    it = _item("- [ ] adim [id:: d-aaaa]")
+    t.set_blocked(it, "2026-09-15", "ses dosyasi yok")
+    try:
+        t.set_blocked(it, "2026-09-17", "baska sebep")
+        assert False, "block silently replaced an existing block"
+    except t.TrailError as e:
+        assert "already blocked" in str(e) and "trail unblock" in str(e), e
+    assert it.fields["blocked"] == "2026-09-15"
+    assert it.fields["blocked-reason"] == "ses dosyasi yok"
+
+    it = _item("- [/] adim [priority:: high] [id:: d-aaaa] "
+               "[blocked:: 2026-09-15] [blocked-reason:: ses yok]")
+    assert t.clear_blocked(it) == "2026-09-15: ses yok"
+    assert list(it.fields) == ["id"], it.fields         # exactly the two, nothing else
+    assert it.render() == "- [/] adim [priority:: high] [id:: d-aaaa]"
+    try:
+        t.clear_blocked(it)
+        assert False, "unblocking an unblocked item was not a no-op"
+    except t.Unchanged as e:
+        assert "not blocked" in str(e), e
+
+    it = _item("- [x] adim [id:: d-aaaa] [completion:: 2026-09-10]")
+    try:
+        t.transition(it, "x", "2026-09-17")
+        assert False, "re-checking re-dated a verified item"
+    except t.Unchanged as e:
+        assert "already [x]" in str(e) and "2026-09-10" in str(e), e
+    assert it.fields["completion"] == "2026-09-10" and not it.dirty
+
+    it = _item("- [-] adim — eski sebep [id:: d-aaaa]")
+    try:
+        t.transition(it, "-", "2026-09-17", "yeni sebep")
+        assert False, "cancel overwrote a cancelled item's reason"
+    except t.TrailError as e:
+        assert "already cancelled" in str(e), e
+    try:
+        t.transition(it, "-", "2026-09-17")      # no reason: a no-op, not an error
+        assert False, "cancelling a cancelled item was not a no-op"
+    except t.Unchanged as e:
+        assert "already [-]" in str(e), e
+    assert it.text == "adim — eski sebep" and not it.dirty
+
+    for bad in ("", "   ", "iki\nsatir", "koseli ] parantez"):
+        try:
+            t.clean_reason(bad, "block")
+            assert False, "clean_reason accepted %r" % bad
+        except t.TrailError:
+            pass
+    assert t.clean_reason("  ses dosyasi yok  ", "block") == "ses dosyasi yok"
+
+
+def test_resolve_item():
+    """Picking one of several matches would be a guess dressed as a command, so
+    the refusal has to carry the plan with it - an agent that cannot see the ids
+    cannot name the item on the second try."""
+    items = [_item("- [ ] Değer seti hazirla [id:: dg-k4m2]"),
+             _item("- [x] eski dg-k4m2 notunu temizle [id:: dg-x7q9]"),
+             _item("- [-] seti iptal et [id:: dg-9zzz]")]
+
+    # an exact id wins even when the id string is also text on another line
+    assert t.resolve_item(items, "dg-k4m2") is items[0]
+    assert t.resolve_item(items, "DG-K4M2") is items[0]
+    # substring, case-insensitive, Turkish included
+    assert t.resolve_item(items, "değer") is items[0]
+    assert t.resolve_item(items, "DEĞER") is items[0]
+    # resolved items are candidates too; filtering them would be guessing
+    assert t.resolve_item(items, "temizle") is items[1]
+    assert t.resolve_item(items, "iptal") is items[2]
+
+    try:
+        t.resolve_item(items, "yokbunyok")
+        assert False, "a query that matches nothing resolved to an item"
+    except t.TrailError as e:
+        assert "no plan item matches 'yokbunyok'" in str(e), e
+        for line in ("  [dg-k4m2] [ ] Değer seti hazirla",
+                     "  [dg-x7q9] [x] eski dg-k4m2 notunu temizle",
+                     "  [dg-9zzz] [-] seti iptal et"):
+            assert line in str(e), (line, str(e))
+
+    try:
+        t.resolve_item(items, "seti")
+        assert False, "an ambiguous query resolved to one item"
+    except t.TrailError as e:
+        assert "2 plan items match 'seti' - say which, by id:" in str(e), e
+        assert "[dg-k4m2]" in str(e) and "[dg-9zzz]" in str(e), e
+        assert "dg-x7q9" not in str(e), e         # only the candidates are listed
+
+
+def _view(*lines):
+    return t.plan_view([t.parse_plan_line(l, i + 1) for i, l in enumerate(lines)])
+
+
+BLOCKED = "[blocked:: 2026-09-15] [blocked-reason:: ses yok]"
+
+
+def test_plan_view_selection():
+    """What `status` answers: what is next, what can run beside it, what is stuck.
+    A blocked item is never offered as work, and `[/]` next does not mean the item
+    is done - the `[ ]` after it is parallel work, not the successor."""
+    v = _view("- [ ] bir [id:: a-aaaa] " + BLOCKED, "- [ ] iki [id:: a-bbbb]")
+    assert v["next"].text == "iki"                      # blocked is skipped for Next
+    assert [it.text for it in v["blocked"]] == ["bir"]
+
+    v = _view("- [/] bir [id:: a-aaaa]",
+              "- [ ] iki [id:: a-bbbb] " + BLOCKED,
+              "- [ ] uc [id:: a-cccc]")
+    assert v["next"].text == "bir" and v["continue_with"].text == "uc"
+
+    v = _view("- [/] bir [id:: a-aaaa]", "- [/] iki [id:: a-bbbb]", "- [ ] uc [id:: a-cccc]")
+    assert v["next"].text == "bir" and v["continue_with"].text == "uc"
+
+    v = _view("- [ ] bir [id:: a-aaaa]", "- [ ] iki [id:: a-bbbb]")
+    assert v["next"].text == "bir" and v["continue_with"] is None
+
+    v = _view("- [ ] bir [id:: a-aaaa] " + BLOCKED, "- [/] iki [id:: a-bbbb] " + BLOCKED)
+    assert v["next"] is None and len(v["blocked"]) == 2
+    assert v["complete"] is False                       # blocked holds the plan open
+
+    v = _view("- [x] bir [id:: a-aaaa] [completion:: 2026-09-17]", "- [-] iki [id:: a-bbbb]")
+    assert v["complete"] is True and v["next"] is None and v["blocked"] == []
+
+    v = _view()
+    assert v["complete"] is False and v["next"] is None
+
+
+# --------------------------------------------------------------------------
+# the validator
+# --------------------------------------------------------------------------
+
+VALID_FM = '---\nid: demo\ntitle: "Demo"\nlevel: T1\nstatus: active\n---\n'
+VALID_SECTIONS = ("Goal", "Plan", "Out of Scope", "Status", "Notes",
+                  "Decision Log", "Open Questions")
+
+
+def vtask(plan="- [ ] adim [id:: d-aaaa]\n", fm=VALID_FM, sections=VALID_SECTIONS):
+    """A minimal valid task file. Frontmatter keys land on lines 2-5 and the plan
+    body starts on line 13, which is what the line numbers below are about."""
+    body = "# demo\n"
+    for s in sections:
+        body += "\n## %s\n" % s
+        if s == "Plan":
+            body += plan
+        elif s == "Goal":
+            body += "tek cumle\n"
+    return fm + body
+
+
+def test_validate_rules():
+    """One fixture per rule. The validator's whole value is that it names the line
+    to open, so a rule that fires on the wrong line is as useless as one that does
+    not fire; and it is the thing you run on a broken file, so it never raises."""
+    assert t.validate_task(vtask(), "demo") == []
+
+    missing_notes = vtask(sections=[s for s in VALID_SECTIONS if s != "Notes"])
+    dup_section = vtask(sections=list(VALID_SECTIONS) + ["Status"])
+    dup_line = len(dup_section.splitlines()) - dup_section.splitlines()[::-1].index("## Status")
+
+    cases = [
+        ("no frontmatter", vtask(fm=""), 1, "no frontmatter block"),
+        ("empty id", vtask(fm='---\nid:\ntitle: "D"\nlevel: T1\nstatus: active\n---\n'),
+         2, "frontmatter: `id` is missing or empty"),
+        ("empty status", vtask(fm='---\nid: demo\ntitle: "D"\nlevel: T1\nstatus:\n---\n'),
+         5, "frontmatter: `status` is missing or empty"),
+        ("unquoted title", vtask(fm='---\nid: demo\ntitle: Rapor: pivot\nlevel: T1\n'
+                                    'status: active\n---\n'),
+         3, "title is not quoted"),
+        ("bad level", vtask(fm='---\nid: demo\ntitle: "D"\nlevel: T5\nstatus: active\n---\n'),
+         4, "level 'T5' is not T1 or T2"),
+        ("bad status", vtask(fm='---\nid: demo\ntitle: "D"\nlevel: T1\nstatus: paused\n---\n'),
+         5, "status 'paused' is not one of"),
+        ("bad started", vtask(fm='---\nid: demo\ntitle: "D"\nlevel: T1\nstatus: active\n'
+                                 'started: dun\n---\n'),
+         6, "started 'dun' is not a YYYY-MM-DD date"),
+        ("links not a list", vtask(fm='---\nid: demo\ntitle: "D"\nlevel: T1\nstatus: active\n'
+                                      'links: x.md\n---\n'),
+         6, "links is not a list"),
+        ("missing section", missing_notes, len(missing_notes.splitlines()),
+         "missing `## Notes` section"),
+        ("duplicated section", dup_section, dup_line, "`## Status` appears more than once"),
+        ("`*` checkbox", vtask(plan="* [ ] adim\n- [ ] ok [id:: d-aaaa]\n"),
+         13, "checkbox with a `*`/`+` bullet"),
+        ("unknown state", vtask(plan="- [?] adim [id:: d-aaaa]\n"),
+         13, "unknown checkbox state [?]"),
+        ("empty text", vtask(plan="- [ ] [id:: d-aaaa]\n"), 13, "plan item has no text"),
+        ("ordered-list trap", vtask(plan="- [ ] 1. adim [id:: d-aaaa]\n"),
+         13, "`1.` after the box starts an ordered list"),
+        ("field twice", vtask(plan="- [ ] adim [id:: d-aaaa] [id:: d-bbbb]\n"),
+         13, "[id:: ] appears twice on the line"),
+        ("empty field value", vtask(plan="- [ ] adim [id::]\n"), 13, "[id:: ] is empty"),
+        ("missing id", vtask(plan="- [ ] adim\n"), 13, "plan item has no [id:: ]"),
+        ("malformed id", vtask(plan="- [ ] adim [id:: NOPE]\n"),
+         13, "[id:: NOPE] is not a trail id"),
+        ("duplicate id", vtask(plan="- [ ] bir [id:: d-aaaa]\n- [ ] iki [id:: d-aaaa]\n"),
+         14, "duplicate id d-aaaa (also on line 13)"),
+        ("[x] without completion", vtask(plan="- [x] adim [id:: d-aaaa]\n"),
+         13, "[x] has no [completion:: ] date"),
+        ("completion on [ ]", vtask(plan="- [ ] adim [id:: d-aaaa] [completion:: 2026-09-17]\n"),
+         13, "[completion:: ] on a [ ] item"),
+        ("bad completion date", vtask(plan="- [x] adim [id:: d-aaaa] [completion:: dun]\n"),
+         13, "[completion:: dun] is not a YYYY-MM-DD date"),
+        ("blocked without reason", vtask(plan="- [ ] adim [id:: d-aaaa] [blocked:: 2026-09-17]\n"),
+         13, "[blocked:: ] without [blocked-reason:: ]"),
+        ("reason without blocked",
+         vtask(plan="- [ ] adim [id:: d-aaaa] [blocked-reason:: ses yok]\n"),
+         13, "[blocked-reason:: ] without [blocked:: ]"),
+        ("bad blocked date",
+         vtask(plan="- [ ] adim [id:: d-aaaa] [blocked:: dun] [blocked-reason:: ses yok]\n"),
+         13, "[blocked:: dun] is not a YYYY-MM-DD date"),
+        ("blocked on [x]",
+         vtask(plan="- [x] adim [id:: d-aaaa] [completion:: 2026-09-17] "
+                    "[blocked:: 2026-09-17] [blocked-reason:: ses yok]\n"),
+         13, "a resolved item cannot be waiting"),
+    ]
+    for label, text, line, needle in cases:
+        found = t.validate_task(text, "demo")
+        assert any(n == line and needle in problem for n, problem, _ in found), \
+            (label, line, needle, found)
+
+    # the id is checked against the file name, not against itself
+    found = t.validate_task(vtask(), "baska")
+    assert [(n, "does not match the file name" in p) for n, p, _ in found] == [(2, True)], found
+
+    # every section is required; their order is not, because the file is a
+    # document people rearrange and the CLI finds each heading by name
+    assert t.validate_task(vtask(sections=tuple(reversed(VALID_SECTIONS))), "demo") == []
+
+    # a file with nothing in it is the case you most want an answer for
+    assert t.validate_task("", "demo")[0][0] == 1
+    assert len(t.validate_task("bir satir\n", "demo")) == 8   # frontmatter + 7 sections
+
+    # and a file the CLI itself wrote, end to end, is clean
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "gecerli", "T2")
+        run_full(tmp, "write", "plan", input="- [ ] bir\n- [ ] iki\n")
+        run(tmp, "check", "bir")
+        run(tmp, "block", "iki", "ses dosyasi hazir degil")
+        f = tmp / ".trail/tasks/gecerli.md"
+        assert t.validate_task(f.read_text("utf-8"), "gecerli") == []
+        assert "ok: 1 task file valid" in run(tmp, "validate")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the reading ladder and the writers
+# --------------------------------------------------------------------------
+
+def test_notes_ladder():
+    """`status` says a count, `notes` hands the findings over whole. An entry that
+    spans lines is one entry: truncating it mid-measurement is how the digest lost
+    the number somebody wrote down."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "bulgu")
+        run(tmp, "start", "bos", "--status", "open")
+        for n in ("bir", "iki", "uc"):
+            run(tmp, "note", "olcum %s" % n, "--task", "bulgu")
+        # a continuation line added by hand: `## Notes` has no rules
+        f = tmp / ".trail/tasks/bulgu.md"
+        f.write_text(f.read_text("utf-8").replace(
+            "· olcum iki\n", "· olcum iki\n  devam satiri: 9.6sn cold\n"), "utf-8")
+
+        out = run(tmp, "notes", "-n", "2", "--task", "bulgu")
+        assert out.splitlines()[0] == "bulgu: last 2 of 3 notes (trail notes --all)", out
+        assert "· olcum bir" not in out, out
+        assert "· olcum iki\n  devam satiri: 9.6sn cold\n" in out, out
+        assert "· olcum uc" in out, out
+
+        out = run(tmp, "notes", "--all", "--task", "bulgu")
+        assert "of 3 notes" not in out, out       # no header when nothing is hidden
+        assert out.count("· olcum ") == 3, out
+        assert "  devam satiri: 9.6sn cold" in out, out
+
+        assert run(tmp, "notes", "--task", "bos").strip() == "bos: no notes"
+        assert "Notes 3 (trail notes)" in run(tmp, "status", "--task", "bulgu")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_log_stdin_contract():
+    """A reason worth writing down is longer than a shell argument, and a shell
+    argument mangles `$x` and quotes on the way in. The split between the two
+    fields has to be deterministic, so anything ambiguous is refused untouched."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "karar")
+        f = tmp / ".trail/tasks/karar.md"
+
+        run_full(tmp, "log", "styled_surface resolve", "--stdin",
+                 input='--why\nilk satir $dollar ve "quote"\nikinci satir\n'
+                       '--dropped\nelenen yol\n')
+        text = f.read_text("utf-8")
+        assert '  - **why:** ilk satir $dollar ve "quote"\n    ikinci satir\n' in text, text
+        assert "  - **dropped:** elenen yol" in text, text
+        entries = t.decision_entries(text)
+        assert len(entries) == 1, entries
+        assert entries[0][0].endswith("· styled_surface resolve"), entries
+        assert entries[0][1] == ['  - **why:** ilk satir $dollar ve "quote"',
+                                 "    ikinci satir",
+                                 "  - **dropped:** elenen yol"], entries
+
+        out = run(tmp, "search", "ikinci satir")
+        assert "styled_surface resolve" in out, out    # the title came with the match
+
+        # an entry is a block, not an essay: a blank line inside a body is dropped,
+        # and an inline value with newlines renders exactly like a stdin one
+        run_full(tmp, "log", "bosluk", "--stdin", input="--why\nbir\n\niki\n")
+        run(tmp, "log", "satirli", "--why", "bir\niki")
+        assert f.read_text("utf-8").count("  - **why:** bir\n    iki\n") == 2, f.read_text("utf-8")
+
+        # inline and stdin mix, as long as they carry different fields
+        run_full(tmp, "log", "karma", "--why", "kisa", "--stdin",
+                 input="--dropped\nsadece elenen\n")
+        assert "  - **why:** kisa\n  - **dropped:** sadece elenen" in f.read_text("utf-8")
+
+        before = f.read_text("utf-8")
+        for label, argv, body, needle in (
+                ("text before the first label", [], "once prose\n--why\nx\n", "must start with"),
+                ("a label twice", [], "--why\na\n--why\nb\n", "--why appears twice"),
+                ("no label at all", [], "sadece govde\n", "must start with"),
+                ("empty stdin", [], "", "no --why or --dropped line found"),
+                ("empty body", [], "--why\n\n--dropped\nx\n", "--why has an empty body"),
+                ("both inline and on stdin", ["--why", "inline"], "--why\nx\n",
+                 "given both inline and on stdin")):
+            r = run_full(tmp, "log", "reddedilen", "--stdin", *argv, input=body, code=1)
+            assert needle in r.stderr, (label, r.stderr)
+            assert f.read_text("utf-8") == before, label
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_item_commands_end_to_end():
+    """The plan stopped being a hand-edited blob: every box is now a command, and
+    the reason a session trusts the result is that a refusal writes nothing and a
+    report says exactly which line moved, by id."""
+    tmp = Path(tempfile.mkdtemp())
+    today = date.today().isoformat()
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "demo-task", "T2")
+        f = tmp / ".trail/tasks/demo-task.md"
+        out = run_full(tmp, "write", "plan",
+                       input="- [ ] alfa adimi\n- [ ] beta adimi\n"
+                             "- [ ] gama adimi\n- [ ] delta adimi\n").stdout
+        assert "4 ids assigned" in out, out
+        ids = [it.id for it in t.parse_plan(f.read_text("utf-8"))]
+        assert len(ids) == 4 and len(set(ids)) == 4, ids
+        for i in ids:
+            assert i.startswith("dt-") and t.ITEM_ID_RE.match(i), i
+
+        assert "Next:\n  [%s] [ ] alfa adimi" % ids[0] in run(tmp, "status")
+
+        out = run(tmp, "check", "alfa")
+        assert out.strip() == "demo-task: [%s] [ ] -> [x] alfa adimi · completion %s" % (
+            ids[0], today), out
+        assert "- [x] alfa adimi [id:: %s] [completion:: %s]" % (ids[0], today) \
+            in f.read_text("utf-8")
+
+        before = f.read_text("utf-8")
+        out = run(tmp, "check", "alfa")             # the end state already holds
+        assert out.strip() == "demo-task: [%s] is already [x] (completion %s); " \
+            "nothing changed" % (ids[0], today), out
+        assert f.read_text("utf-8") == before
+
+        run(tmp, "check", "beta", "--partial")
+        out = run(tmp, "status")
+        assert "Next:\n  [%s] [/] beta adimi" % ids[1] in out, out
+        assert "Can continue with:\n  [%s] [ ] gama adimi" % ids[2] in out, out
+
+        out = run(tmp, "block", "gama", "ses dosyasi hazir degil")
+        assert out.strip() == "demo-task: [%s] [ ] gama adimi · blocked %s: " \
+            "ses dosyasi hazir degil" % (ids[2], today), out     # the box is not touched
+        out = run(tmp, "status")
+        assert "Blocked:\n  [%s] [ ] gama adimi · blocked since %s: ses dosyasi hazir degil" % (
+            ids[2], today) in out, out
+        assert "Next:\n  [%s] [/] beta adimi" % ids[1] in out, out
+        assert "Can continue with:\n  [%s] [ ] delta adimi" % ids[3] in out, out
+
+        before = f.read_text("utf-8")
+        r = run_full(tmp, "check", "gama", code=1)
+        assert "is blocked" in r.stderr and "trail unblock %s" % ids[2] in r.stderr, r.stderr
+        assert f.read_text("utf-8") == before
+        r = run_full(tmp, "block", "gama", "baska sebep", code=1)
+        assert "already blocked" in r.stderr, r.stderr
+        assert "trail unblock %s && trail block %s" % (ids[2], ids[2]) in r.stderr, r.stderr
+        assert f.read_text("utf-8") == before
+
+        # the reason is written as an inline field, so it has to survive being one
+        for reason, needle in (("kose ] parantez", "cannot contain ']'"),
+                               ("", "needs a reason")):
+            r = run_full(tmp, "block", "delta", reason, code=1)
+            assert needle in r.stderr, r.stderr
+            assert f.read_text("utf-8") == before
+
+        # blocked is independent of the box: it may still move, just not to resolved
+        run(tmp, "check", "gama", "--partial")
+        run(tmp, "uncheck", "gama")
+        assert "[blocked-reason:: ses dosyasi hazir degil]" in f.read_text("utf-8")
+
+        before = f.read_text("utf-8")
+        for argv in (["check", "beta", "--partial"], ["unblock", "beta"]):
+            out = run(tmp, *argv)                   # the end state already holds
+            assert "nothing changed" in out, (argv, out)
+            assert f.read_text("utf-8") == before, argv
+
+        out = run(tmp, "unblock", "gama")
+        assert "unblocked (was %s: ses dosyasi hazir degil)" % today in out, out
+        gama = [it for it in t.parse_plan(f.read_text("utf-8")) if it.id == ids[2]][0]
+        assert not gama.blocked and gama.state == " ", gama
+        assert "- [ ] gama adimi [id:: %s]\n" % ids[2] in f.read_text("utf-8")
+
+        run(tmp, "cancel", "delta", "kapsam disi")
+        assert "- [-] delta adimi — kapsam disi [id:: %s]" % ids[3] in f.read_text("utf-8")
+
+        before = f.read_text("utf-8")
+        r = run_full(tmp, "check", "adimi", code=1)
+        assert "4 plan items match 'adimi' - say which, by id:" in r.stderr, r.stderr
+        assert f.read_text("utf-8") == before
+        r = run_full(tmp, "check", "yokbunyok", code=1)
+        assert "no plan item matches 'yokbunyok'. The plan:" in r.stderr, r.stderr
+        assert "[%s] [x] alfa adimi" % ids[0] in r.stderr, r.stderr
+        assert f.read_text("utf-8") == before
+
+        # a parked task is still addressable: --task, like every other writer
+        run(tmp, "start", "park", "--status", "open")
+        run_full(tmp, "write", "plan", "--task", "park", input="- [ ] park adimi\n")
+        park = tmp / ".trail/tasks/park.md"
+
+        # re-piping a body that already carries its ids assigns none, and says so
+        # by leaving the count out rather than reporting zero
+        body = t.get_section(park.read_text("utf-8"), "Plan")
+        out = run_full(tmp, "write", "plan", "--task", "park", input=body + "\n").stdout
+        assert out.strip() == "park: ## Plan written (1 line)", out
+
+        # two lines carrying the same id: refuse the whole body, write nothing
+        before = park.read_text("utf-8")
+        r = run_full(tmp, "write", "plan", "--task", "park", code=1,
+                     input="- [ ] bir [id:: p-aaaa]\n- [ ] iki [id:: p-aaaa]\n")
+        assert "duplicate plan id p-aaaa" in r.stderr, r.stderr
+        assert park.read_text("utf-8") == before
+
+        out = run(tmp, "check", "park adimi", "--task", "park")
+        assert "-> [x] park adimi · completion %s" % today in out, out
+        assert out.startswith("park: [p-"), out
+
+        # an id-less line added by hand is rewritten anyway, so it earns an id
+        f.write_text(f.read_text("utf-8").replace(
+            "- [-] delta", "- [/] elle eklendi\n- [-] delta"), "utf-8")
+        out = run(tmp, "uncheck", "elle eklendi")
+        assert "· id assigned" in out, out
+        new_id = [it.id for it in t.parse_plan(f.read_text("utf-8"))
+                  if it.text == "elle eklendi"][0]
+        assert new_id.startswith("dt-") and t.ITEM_ID_RE.match(new_id), new_id
+        assert "- [ ] elle eklendi [id:: %s]\n" % new_id in f.read_text("utf-8")
+
+        run(tmp, "block", "gama", "beklemede")
+        plan = json.loads(run(tmp, "status", "--json"))["tasks"][0]["plan"]
+        assert [p["id"] for p in plan] == ids[:3] + [new_id, ids[3]], plan
+        assert set(plan[0]) == {"id", "state", "text", "line", "completion",
+                                "blocked", "blocked_reason"}, plan[0]
+        by_id = {p["id"]: p for p in plan}
+        assert by_id[ids[0]]["state"] == "x" and by_id[ids[0]]["completion"] == today
+        assert by_id[ids[2]]["blocked"] == today
+        assert by_id[ids[2]]["blocked_reason"] == "beklemede"
+        assert by_id[ids[3]]["state"] == "-" and by_id[ids[3]]["completion"] is None
+        assert json.loads(run(tmp, "show", "demo-task", "--json"))["plan"] == plan
+
+        out = run(tmp, "done")
+        assert "closing with plan items open - deliberate?" in out, out
+        assert "[%s] [/] beta adimi" % ids[1] in out, out
+        assert "[%s] [ ] gama adimi · blocked since %s: beklemede" % (ids[2], today) in out, out
+        assert "[%s] [ ] elle eklendi" % new_id in out, out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_plan_complete_nudge():
+    """The plan says nothing is left, the status says work is on: one of them is
+    stale and only a person knows which. A blocked item is not 'left', so the
+    nudge has to stay quiet while anything is still waiting."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "bitti", "T2")
+        run_full(tmp, "write", "plan", input="- [ ] bir\n- [ ] iki\n")
+        run(tmp, "check", "bir")
+        run(tmp, "cancel", "iki", "gereksiz")
+        nudge = "bitti: every plan item is resolved but the task is still active"
+        out = run(tmp, "status")
+        assert "Next: none - every plan item is resolved" in out, out
+        assert nudge in out, out
+
+        f = tmp / ".trail/tasks/bitti.md"
+        resolved = f.read_text("utf-8")
+        f.write_text(resolved.replace(
+            "- [-] iki", "- [ ] uc [id:: b-zzzz] [blocked:: 2026-09-15] "
+                         "[blocked-reason:: bekliyor]\n- [-] iki"), "utf-8")
+        out = run(tmp, "status")
+        assert "Next: none - every remaining item is blocked" in out, out
+        assert nudge not in out, out
+        f.write_text(resolved, "utf-8")
+
+        # a task with no plan at all is not nudged either
+        run(tmp, "set", "status", "open", "--task", "bitti")
+        run(tmp, "start", "plansiz")
+        out = run(tmp, "status")
+        assert "Task: plansiz" in out and "every plan item is resolved" not in out, out
+
+        run(tmp, "set", "status", "active", "--task", "bitti")
+        run(tmp, "set", "status", "open", "--task", "plansiz")
+        assert nudge in run(tmp, "status")
+        run(tmp, "done", "--task", "bitti")
+        assert "every plan item is resolved" not in run(tmp, "status")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_format_nudge():
+    """A file only trail reads is a file nobody checks. The nudge is the only way
+    a session learns that the plan it is about to act on has a line the CLI cannot
+    name - and it has to say which command lists them."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "bicim", "T2")
+        run_full(tmp, "write", "plan", input="- [ ] bir\n")
+        f = tmp / ".trail/tasks/bicim.md"
+        f.write_text(f.read_text("utf-8").replace(
+            "## Out of Scope", "- [ ] elle eklendi\n\n## Out of Scope"), "utf-8")
+
+        out = run(tmp, "status")
+        assert "bicim: 1 format problem in the task file" in out, out
+        assert "trail validate --task bicim" in out, out
+        # the finding names the line and the fix sits under it, aligned
+        r = run_full(tmp, "validate", "--task", "bicim", code=1)
+        lines = r.stdout.splitlines()
+        assert lines[0] == ".trail/tasks/bicim.md", lines
+        assert lines[1].startswith("  line ") and "plan item has no [id:: ]" in lines[1], lines
+        head = lines[1].index(": ") + 2
+        assert lines[2].startswith(" " * head + "fix: "), lines
+        assert "trail write plan" in lines[2], lines
+        assert lines[3] == "1 problem in 1 of 1 task file", lines
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_init_installs_both_skills():
+    """Two entry points, one install step: a repo that got only /trail never learns
+    that /trail-plan exists, and a drifted copy is the user's edit, not trail's."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        for name in t.SKILLS:
+            assert (tmp / ".claude/skills" / name / "SKILL.md").is_file(), name
+        assert not (tmp / ".agents").exists()
+
+        planned = tmp / ".claude/skills/trail-plan/SKILL.md"
+        planned.write_text("stale\n", "utf-8")
+        assert ".claude/skills/trail-plan/SKILL.md differs" in run(tmp, "init")
+        assert planned.read_text("utf-8") == "stale\n"          # warned, never clobbered
+        assert "(refreshed)" in run(tmp, "init", "--force")
+        assert planned.read_text("utf-8") == (HERE / "skills" / "trail-plan"
+                                              / "SKILL.md").read_text("utf-8")
+
+        # a .codex marker routes both files to the shared .agents path
+        (tmp / ".codex").mkdir()
+        run(tmp, "init")
+        for name in t.SKILLS:
+            assert (tmp / ".agents/skills" / name / "SKILL.md").is_file(), name
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

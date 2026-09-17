@@ -52,13 +52,16 @@ Then, in any repo:
 trail init
 ```
 
-This creates `.trail/` (including an empty `backlog.md`) and a
-`SKILL.md` for whichever agents the repo already uses. Agents disagree about where project skills live — Claude Code
-reads `.claude/skills/`, while Codex, Cursor and Gemini CLI read `.agents/skills/` —
-so `init` detects the marker directories present and writes to the right ones.
+This creates `.trail/` (including an empty `backlog.md`) and two skills for whichever
+agents the repo already uses: `/trail` resumes a task, works it, logs, hands off and
+closes it — one task at a time — and `/trail-plan` turns a document or a brain dump
+into tasks and backlog lines. Each is complete on its own, so a session loads one of
+them. Agents disagree about where project skills live — Claude Code reads
+`.claude/skills/`, while Codex, Cursor and Gemini CLI read `.agents/skills/` — so
+`init` detects the marker directories present and writes to the right ones.
 
-`init` never overwrites what is already there — `--force` refreshes a drifted `SKILL.md`, and
-leaves your `config.yml` and `_template.md` alone.
+`init` never overwrites what is already there — `--force` refreshes a drifted skill
+copy, and leaves your `config.yml` and `_template.md` alone.
 Force it with `trail init --agent claude|codex|cursor|gemini|all`.
 
 ## Use
@@ -71,8 +74,21 @@ trail link docs/deeplink-design.md      # point the task at the design
 trail log "route via AppLinks" \
      --why "Universal Links needs an AASA host we don't control" \
      --dropped "Universal Links"        # write it the moment you decide
+trail log "route via AppLinks" --stdin <<'EOF'   # same entry, reasons too long to quote
+--why
+Universal Links needs an AASA host we don't control
+--dropped
+Universal Links
+EOF
 trail note "12 widgets, 9.6s cold, phases are serial"   # findings, free-form
+trail notes                             # the last five of them (-n N, --all)
 trail handoff "parser done, wiring the receiver next"
+trail check "parse the URL"             # [x] + completion date; id or a piece of the text
+trail check dh-k4m2 --partial           # [/] written, not verified
+trail uncheck dh-k4m2                   # back to [ ]
+trail cancel dh-k4m2 "handled upstream" # [-], reason after the text
+trail block dh-k4m2 "AASA host not up"  # dated; the box stays as it is
+trail unblock dh-k4m2
 trail set status blocked                # status | level | title | group
 printf 'one sentence\n' | trail write goal   # prose sections come from stdin
 trail status                            # what am I doing, what went stale
@@ -80,13 +96,18 @@ trail status --task other-thing         # a task you are not on
 trail ls --stale 7                      # untouched for a week
 trail board                             # kanban, narrowed to the active group
 trail board --all                       # every group
+trail validate                          # every task file against the format
 trail done                              # mark done, report the backlog around it
 ```
 
 `## Plan` items are checkboxes — `[ ]` not started, `[/]` written but not verified,
-`[x]` verified, `[-]` cancelled — and `ls` reports the count, so "where did we stop"
-is answered without opening anything. Prefer the commands, but the files are yours:
-when the CLI cannot express what you mean, edit them, just keep the format intact.
+`[x]` verified, `[-]` cancelled — and each carries an id that `trail write plan`
+assigns (`[id:: dh-k4m2]`; never write one by hand). `status` prints
+`[dh-k4m2] [/] …` and the item commands take the id or a piece of the text, so an
+item is addressed without opening the file; `ls` reports the count, so "where did we
+stop" is answered without opening anything. Prefer the commands, but the files are
+yours: when the CLI cannot express what you mean, edit them, just keep the format
+intact — `trail validate` says when you did not.
 
 `trail ls`, `trail show` and `trail status` take `--json`.
 
@@ -162,8 +183,8 @@ stale_days: 7
 ```
 
 Custom frontmatter fields go in `_template.md`, not in config. The CLI reads only
-`id` `title` `level` `status` `started` `links`; everything else is yours and is
-preserved on write.
+`id` `title` `level` `status` `started` `group` `links`; everything else is yours
+and is preserved on write.
 
 ## Nudges
 
@@ -171,10 +192,13 @@ preserved on write.
 have fired for the answer to be right.
 
 - task file untouched for `stale_days` → *still active? close it or continue*
-- code changed more recently than the task file → *you worked, you didn't log*
+- every plan item resolved but the task still active → *close it, or add what is left*
+- format problems in a live task file → *`trail validate --task <id>` lists them*
 - a scaffold file this repo predates is missing → *run `trail init`*
 
-Nudges only remind. Nothing is ever written automatically.
+Nudges only remind. Nothing is ever written automatically, and nothing is read from
+git: trail runs no git command, so no nudge compares the code against the task file.
+Keeping the records current while the work happens is the model's job, not a diff's.
 
 `TRAIL_DISABLED=1` turns every command into a no-op.
 
@@ -186,9 +210,12 @@ python3 test_trail.py
 
 ## Not in scope
 
-Assignees, priorities, due dates, dependency graphs, label taxonomies, search.
-The read commands exist for visibility, not for management. Automatic decision
-summarization is deliberately absent: the human stays in the loop.
+Assignees, priorities, due dates, label taxonomies. Note ids, dependency graphs,
+event history, automatic promotion of a note into a decision, a `--force` that
+overwrites a recorded date or reason. The read commands exist for visibility, not
+for management: trail carries context to the next session; it does not manage the
+project. Automatic decision summarization is deliberately absent: the human stays in
+the loop.
 
 ## License
 

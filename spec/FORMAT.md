@@ -13,9 +13,12 @@ is the product.
   tasks/<slug>.md     every task, open through done — files never move
 ```
 
-`trail init` also drops `SKILL.md` where the repo's agents look for project skills:
-`.claude/skills/trail/` for Claude Code, `.agents/skills/trail/` for Codex, Cursor and
-Gemini CLI. There is no single path every agent reads.
+`trail init` also drops two skills where the repo's agents look for project skills:
+`trail/SKILL.md` (`/trail` — resume, work, log, close, start one task) and
+`trail-plan/SKILL.md` (`/trail-plan` — a document or brain dump into tasks and backlog
+lines), under `.claude/skills/` for Claude Code and `.agents/skills/` for Codex,
+Cursor and Gemini CLI. There is no single path every agent reads, and no single skill
+either: each file is complete for its own scenario, so a session loads one of them.
 
 trail keeps no second, repo-lifetime record. A decision log belongs to its task and
 stays in its file, which is now permanent; four closes across two real repos produced
@@ -60,8 +63,9 @@ you came for.
 
 ### Core fields
 
-`id` · `title` · `level` · `status` · `group` are the only fields the CLI reads.
-Everything else is free — add fields to `_template.md` and nothing breaks.
+`id` · `title` · `level` · `status` · `started` · `group` · `links` are the only
+fields the CLI reads. Everything else is free — add fields to `_template.md` and
+nothing breaks.
 
 - `title` is **always written quoted**. Titles carry colons ("Report: pivot matrix")
   and a bare colon makes the whole block invalid YAML — which is how two of the five
@@ -86,18 +90,55 @@ use: *these came from the same plan*.
 ### Plan items are checkboxes
 
 ```markdown
-- [x] measure the run shape on device [completion:: 2026-09-11]
-- [/] classify ErrorCode into messages
-- [ ] overlap the loading phases
-- [-] landscape mode — portrait-locked natively on both platforms
+- [x] measure the run shape on device [id:: ap-3f1k] [completion:: 2026-09-11]
+- [/] classify ErrorCode into messages [id:: ap-k4m2]
+- [ ] wire the audio player [id:: ap-9zzz] [blocked:: 2026-09-15] [blocked-reason:: audio file not ready]
+- [-] landscape mode — portrait-locked natively on both platforms [id:: ap-x7q9]
 ```
 
 | | |
 | --- | --- |
 | `[ ]` | not started |
 | `[/]` | written, not verified — the state that has no name in prose and therefore gets lost |
-| `[x]` | verified. Not "I wrote it": verified. `[completion:: YYYY-MM-DD]` is Dataview's inline-field syntax and is optional everywhere else |
-| `[-]` | cancelled — the item stays, with why it fell out of scope next to it |
+| `[x]` | verified. Not "I wrote it": verified. `trail check` dates it with `[completion:: YYYY-MM-DD]`, and the validator wants the date on every `[x]` |
+| `[-]` | cancelled — the item stays, with why it fell out of scope as prose after the text (`— reason`). No field for it, by decision: new syntax only when something has to query it |
+
+The box is progress and nothing else. Blocked is not a fifth state but metadata on
+the line, independent of the box: `[/]` + blocked is legal — written, waiting on
+something before it can be verified — while `[x]` or `[-]` + blocked is a
+contradiction the CLI refuses to create and the validator reports.
+
+The bracketed fields are Dataview's inline-field syntax, `[key:: value]`, so an
+Obsidian vault queries them without a plugin. trail owns exactly four:
+
+| Field | Written by | Present when |
+| --- | --- | --- |
+| `id` | `trail write plan`, or an item command that rewrites an id-less line | always, once the CLI has seen the line; the validator reports a line without one |
+| `completion` | `trail check`; removed by `check --partial`, `uncheck`, `cancel` | the item is `[x]` |
+| `blocked` | `trail block`; removed by `trail unblock` | the item is waiting; the value is the date it started waiting |
+| `blocked-reason` | `trail block`, alongside `blocked` | whenever `blocked` is. One line, no `]` — an inline field cannot nest a bracket |
+
+An id is `<initials of the slug's parts>-<four random [a-z0-9]>`: the task
+`auth-provider` gets `ap-k4m2`, `user-1-profile` gets `u1p-9x7b`. `trail write plan`
+assigns one to every checkbox line that has none, and an item command that rewrites
+an id-less line assigns one on the way (its report says `· id assigned`). Once written
+an id never changes — the prefix is not checked against the slug afterwards, so a
+task can be renamed or its plan copied without touching them — and it is unique
+within one file, nowhere else. Never write one by hand: the validator reports a
+malformed or duplicated id, and the CLI regenerates nothing.
+
+Ids exist so that a plan item can be addressed from the CLI without opening the file.
+The text is what a person reads, and it changes — reworded, translated, given a
+reason — while the id is what a command and a `status` line point at, and it does
+not.
+
+The fields are read from anywhere on the line and written back after the text;
+fields already on the line keep their order, new ones are appended — except an id
+assigned on the way, which leads them, as `write plan` writes it. Any other
+`[key:: value]`, a `[[wikilink]]`, an HTML comment — all text, preserved byte for
+byte. Only `- ` bullets are items (`* [ ]` is a list to Markdown and nothing to
+trail); indented checkboxes are items too; a fenced code block inside `## Plan`, and
+inline code on an item's line, are opaque whatever they contain; `X` reads as `x`.
 
 Nothing else goes between the box and the text. `- [ ] 1. Measure first` opens an
 ordered list *inside* the task item, which is not what it looks like and breaks
@@ -108,6 +149,49 @@ This is the whole set. The next session reads the boxes instead of re-reading th
 code, and the reader learns what is left without cross-referencing `## Status`
 against a prose list. `ls` reports `verified / live` per task, where `[-]` leaves the
 denominator — cancelled is resolved, not pending.
+
+### Plan item commands
+
+```bash
+trail check <item>              # [x] + [completion:: today]
+trail check <item> --partial    # [/]; drops the completion date
+trail uncheck <item>            # [ ]; drops the completion date
+trail cancel <item> ["<why>"]   # [-]; the reason lands after the text
+trail block <item> "<why>"      # [blocked:: today] [blocked-reason:: why]; box untouched
+trail unblock <item>            # removes the two blocked fields, nothing else
+```
+
+`<item>` is an id or a piece of the text, resolved in that order: an exact id first,
+then a case-insensitive substring of the item text with trail's fields stripped. One
+hit acts. None, or several, is refused with the candidates listed as `[id] [s] text`
+and nothing written — picking one would be a guess dressed as a command. Resolved
+items are candidates too, because filtering them out would be a guess as well. The
+commands take `--task <slug>` like every other writer and otherwise target the task
+in progress. A change is reported as
+`<task>: [<id>] [<old>] -> [<new>] <text> · <detail>`.
+
+A box change never clears a block as a side effect, and a block never resolves a
+box. `check` and `cancel` refuse a blocked item — unblock it first — and `block`
+refuses a resolved one. `check --partial` and `uncheck` are allowed on a blocked
+item; that is the `[/]` + blocked case above.
+
+What already holds is a no-op; what would overwrite a record is a refusal; the two
+look different on purpose. `check` on an `[x]`, `unblock` on an unblocked item,
+`cancel` without a reason on a `[-]`: exit 0, "nothing changed", the recorded date
+stays. `block` on a blocked item, `cancel` with a reason on a `[-]`: exit 1, the
+recorded value shown, the file untouched — a completion date or a reason someone
+wrote down is not replaced by a command that did not know it was there. There is no
+`--force`. Replacing a reason is two explicit steps —
+`trail unblock <id> && trail block <id> "<reason>"` — and the refusal prints them.
+
+`trail status` derives its view from the boxes and the fields. **Next** is the first
+unresolved item that is not blocked. When Next is `[/]` — written, waiting on
+verification — **Can continue with** offers the first non-blocked `[ ]` after it:
+work that can go on meanwhile, not a claim that Next is done. **Blocked** lists every
+unresolved blocked item with its date and reason; a blocked item is never Next. When
+nothing is open the line says which kind of nothing:
+`Next: none - every remaining item is blocked` holds the plan open,
+`Next: none - every plan item is resolved` means it is time for `trail done`.
 
 ### Writes are serialised
 
@@ -130,6 +214,30 @@ One scannable title line, the reasons indented under it. The old one-line form p
 `why:` and `dropped:` inside a 600-character sentence, where finding either meant
 reading all of it. `dropped:` is still the reason the format exists.
 
+A reason may run to several lines: the first sits after its label, the rest continue
+indented four spaces, as above, and blank lines inside a reason are dropped — an
+entry is a block, not an essay. `search` and `status --full` read the block as one
+entry. Reasons that long do not survive a shell argument, so `trail log` also takes
+them from stdin:
+
+```bash
+trail log "styled_surface resolve" --stdin <<'EOF'
+--why
+first line of the reason
+second line
+--dropped
+the alternative that was rejected
+EOF
+```
+
+A line that is exactly `--why` or `--dropped` opens that field; everything up to the
+next label is its body. The labels are the flags themselves, so there is nothing new
+to learn and no line of prose looks like one, and the quoted `'EOF'` keeps the shell
+out of the text. Inline and stdin mix for different fields — `--why "short" --stdin`
+with only `--dropped` on stdin. Refused, because the split has to be deterministic:
+non-blank text before the first label, a label given twice, no label at all, an empty
+body under a label, and a field given both inline and on stdin.
+
 ### `## Notes`
 
 Free-form, append-only, dated by `trail note`. Nothing prescribes its shape.
@@ -138,6 +246,12 @@ It exists because the first real ledger pushed twenty-eight lines of measurement
 findings into the backlog for want of anywhere else to put them. A measurement is not
 deferred work and it is not a decision; without a home it lands in whichever section
 is nearest.
+
+`trail notes` prints the last five entries verbatim, a multi-line entry whole (`-n N`
+for more, `--all` for everything). `status` counts them and never prints them, so the
+reading ladder is `trail status` → `trail notes` → `trail status --full` →
+`trail show`: each step buys more of the file, and a session stops at the first one
+that answers.
 
 ## What belongs in a task file
 
@@ -204,8 +318,8 @@ stored copy has a second source of truth and task files are hand-editable.
 
 ## Config
 
-Flat YAML. Keys: `backlog` `dir` `decisions` `template` `stale_days`. Unknown keys
-are ignored.
+Flat YAML. Keys: `backlog` `dir` `template` `stale_days`, plus the legacy `archive`,
+still read. Unknown keys are ignored.
 
 `archive` is retired. Closing a task sets `status: done` and leaves the file where it
 is: paths stay valid for everything that links to them, and the closed task — the one
@@ -216,12 +330,54 @@ status.
 
 ## Parsing rules
 
+trail reads a controlled subset of the file and passes everything else through: the
+frontmatter, the known `##` sections (found by heading), the checkbox lines inside
+`## Plan`, and on those lines the four inline fields. Prose under a heading, a `###`
+sub-heading, an HTML comment, a wikilink, an inline field trail does not own, a
+fenced code block — opaque, and preserved byte for byte. The file is hand-editable,
+so the CLI has to be a guest in it.
+
 Frontmatter is read with a flat YAML subset: scalars, `- item` lists, `#` comments.
 A key with an empty value reads as an empty list.
 
-**Writes are surgical.** The CLI replaces a single frontmatter line by regex and
-never reserializes the block, so comments, ordering and fields it does not
-understand survive untouched.
+**Writes are surgical.** A command replaces a single frontmatter line by regex, one
+section body, or a single plan line — never a file reserialised from what the parser
+understood, which would drop every comment and normalise every line it had merely
+read. Comments, ordering and fields it does not understand survive untouched.
+
+## Validation
+
+`trail validate` checks every file in `.trail/tasks/` (a legacy `archive/` is
+skipped; `--task <slug>` narrows to one) against this contract and nothing more: the
+frontmatter, the required sections, the plan items and their fields. It is not a
+Markdown linter. `## Notes` has no rules, the decision log and the backlog are not
+checked, and a section or field the CLI does not read is not its business.
+
+Every finding is an error — one severity, because a file either round-trips through
+the CLI or it does not:
+
+| Where | Findings |
+| --- | --- |
+| frontmatter | block missing; `id` `title` `level` `status` missing or empty; `id` not the file name; an unquoted `title` that is not valid YAML; `level` not T1/T2; `status` outside the set; `started` not a date; `links` not a list |
+| sections | one of the seven required headings missing or repeated — order is not checked, the CLI does not depend on it |
+| plan items | a `*`/`+` checkbox bullet; an unknown box state; empty text; the `1.` ordered-list trap; a trail field twice on a line; an empty field value; an id missing, malformed or duplicated; `[x]` without `completion`; `completion` on a non-`[x]`; a date that is not `YYYY-MM-DD`; `blocked` without a reason, or a reason without `blocked`; blocked on a resolved item |
+
+Output is grouped per file, each finding with its line and the command that fixes
+it; exit 1 when anything is found, `ok: N task files valid` otherwise:
+
+```
+.trail/tasks/auth-provider.md
+  line 18: [x] has no [completion:: ] date
+           fix: trail uncheck <id> && trail check <id> re-dates it, or add [completion:: YYYY-MM-DD]
+  line 21: plan item has no [id:: ]
+           fix: `trail write plan` assigns ids to lines without one (re-pipe the section); do not invent ids by hand
+2 problems in 1 of 3 task files
+```
+
+Nothing is repaired and there is no legacy migration: a file from before ids is
+brought up by hand — re-pipe its plan through `trail write plan` — and the validator
+describes the target format rather than guessing at the origin. A live task that
+fails is also one line in `trail status`; see Nudges.
 
 ## Nudges
 
@@ -231,7 +387,13 @@ to have fired for the state to be correct.
 | Condition | Signal |
 | --- | --- |
 | Abandoned task | task file mtime older than `stale_days` |
-| Unwritten log | a file in `git diff --name-only HEAD` is newer than the task file |
+| Plan finished, task not | every item `[x]` or `[-]`, none blocked, and the task still `active` — one of the two is stale, and only a person knows which. Trail data only: not git, not the clock |
+| Format problems in a live task | `trail validate` finds anything in an active or blocked task file; one line, naming the command |
+
+trail never runs git — no commits, no `HEAD`, no history, and no freshness derived
+from it — so no nudge can say "you worked and did not log". That is the model's job:
+it keeps the task's records current within the same piece of work, which is the only
+place a missing log line can still be caught.
 
 Nudges only remind. Nothing is written automatically.
 
@@ -265,3 +427,11 @@ The tag must match a whole token: `#auth-1` does not match `#auth-1-extra`.
 Growth is expected; the failure signal is the opposite. Backlog lines describing work
 that was already done mean the boundary leaked and T0 started paying a tax. Lines
 describing *measurements* mean `## Notes` is not being used.
+
+## Not in scope
+
+Note ids, dependency graphs, event history, automatic promotion of a note into a
+decision, and a `--force` that overwrites a recorded date or reason. Each is a
+task-manager feature, and trail is not one: it carries context to the next session;
+it does not manage the project. What a manager would store, `status` derives on
+read; what it would automate, the human still decides.
