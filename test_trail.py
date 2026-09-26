@@ -136,7 +136,7 @@ def test_a_new_session_can_resume_from_the_reading_path_alone():
         run(tmp, "start", "rapor-3-sayfa", "T1", "--group", "rapor", "--status", "open")
         for section, body in (("goal", "Tablo gercek veriyle ciziliyor.\n"),
                               ("scope", "- Pivot MODULE DISI, rapor-5'e ait.\n"),
-                              ("plan", "- [x] kolon cozumu\n- [ ] sayfa hata yolu\n"),
+                              ("steps", "- [x] kolon cozumu\n- [ ] sayfa hata yolu\n"),
                               ("questions", "Cursor son satiri neden dusuruyor?\n")):
             r = subprocess.run([sys.executable, str(BIN), "write", section,
                                 "--task", "rapor-2-tablo"],
@@ -492,19 +492,19 @@ def test_end_to_end():
                            cwd=str(tmp), input="tek cumle\n", capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         assert t.get_section(f2.read_text("utf-8"), "Goal") == "tek cumle"
-        r = subprocess.run([sys.executable, str(BIN), "write", "plan", "--task", "planned-item"],
+        r = subprocess.run([sys.executable, str(BIN), "write", "steps", "--task", "planned-item"],
                            cwd=str(tmp), input="adim 1\nadim 2\n", capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
-        assert t.get_section(f2.read_text("utf-8"), "Plan") == "adim 1\nadim 2"
+        assert t.get_section(f2.read_text("utf-8"), "Steps") == "adim 1\nadim 2"
 
-        # plan progress: [x] counts, [-] leaves the denominator, [/] is not done yet
-        r = subprocess.run([sys.executable, str(BIN), "write", "plan", "--task", "planned-item"],
+        # step progress: [x] counts, [-] leaves the denominator, [/] is not done yet
+        r = subprocess.run([sys.executable, str(BIN), "write", "steps", "--task", "planned-item"],
                            cwd=str(tmp),
                            input="- [x] one [completion:: 2026-09-12]\n- [/] two\n- [ ] three\n- [-] four\n",
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
-        assert t.plan_progress(f2.read_text("utf-8")) == (1, 3)
-        assert t.plan_view(t.parse_plan(f2.read_text("utf-8")))["next"].text == "two"
+        assert t.step_progress(f2.read_text("utf-8")) == (1, 3)
+        assert t.steps_view(t.parse_steps(f2.read_text("utf-8")))["next"].text == "two"
         assert "1/3" in run(tmp, "ls")
 
         # closing reports the backlog around the task and changes nothing in it
@@ -527,29 +527,29 @@ def test_end_to_end():
 
 
 # --------------------------------------------------------------------------
-# the plan line: the only Markdown trail parses instead of passing through
+# the step line: the only Markdown trail parses instead of passing through
 # --------------------------------------------------------------------------
 
-def test_plan_line_round_trip():
+def test_step_line_round_trip():
     """The line is the format. A line the CLI wrote has to survive parse -> render
     byte for byte, and everything trail does not own - a wikilink, a foreign inline
-    field, an indent - has to come back untouched, or hand-edited plans rot the
+    field, an indent - has to come back untouched, or hand-edited steps rot the
     moment a command runs."""
     # inline code is opaque, like a fenced block: an item about the format mentions
     # `[completion:: YYYY-MM-DD]` in backticks, and that must not read as a field
-    it = t.parse_plan_line("- [x] rule: `[completion:: YYYY-MM-DD]` on [x] [id:: a-bbbb] [completion:: 2026-09-12]")
+    it = t.parse_step_line("- [x] rule: `[completion:: YYYY-MM-DD]` on [x] [id:: a-bbbb] [completion:: 2026-09-12]")
     assert it.fields == {"id": "a-bbbb", "completion": "2026-09-12"}, it.fields
     assert it.dupes == [] and it.text == "rule: `[completion:: YYYY-MM-DD]` on [x]", it
     assert it.render() == "- [x] rule: `[completion:: YYYY-MM-DD]` on [x] [id:: a-bbbb] [completion:: 2026-09-12]"
 
     line = "- [x] classify ErrorCode [id:: ap-k4m2] [completion:: 2026-09-17]"
-    assert t.parse_plan_line(line, 1).render() == line
+    assert t.parse_step_line(line, 1).render() == line
 
-    assert t.parse_plan_line("- [X] upper", 1).state == "x"       # `X` reads as `x`
+    assert t.parse_step_line("- [X] upper", 1).state == "x"       # `X` reads as `x`
 
     # trail's fields are read from anywhere on the line and written back after the
     # text, keeping the order they already had
-    it = t.parse_plan_line(
+    it = t.parse_step_line(
         "- [ ] before [completion:: 2026-09-17] middle [id:: ab-1234] after", 1)
     assert it.text == "before middle after", it.text
     assert list(it.fields) == ["completion", "id"], it.fields
@@ -557,19 +557,19 @@ def test_plan_line_round_trip():
 
     # not trail's: text, byte for byte
     src = "- [/] see [[Design Doc]] and [priority:: high] rest [id:: ab-1234]"
-    it = t.parse_plan_line(src, 1)
+    it = t.parse_step_line(src, 1)
     assert it.text == "see [[Design Doc]] and [priority:: high] rest", it.text
     assert it.render() == src
 
-    assert t.parse_plan_line("* [ ] x", 1) is None              # only `- ` bullets
-    assert t.parse_plan_line("- [x](http://u) x", 1) is None    # a link, not a box
-    sub = t.parse_plan_line("  - [ ] sub", 1)
+    assert t.parse_step_line("* [ ] x", 1) is None              # only `- ` bullets
+    assert t.parse_step_line("- [x](http://u) x", 1) is None    # a link, not a box
+    sub = t.parse_step_line("  - [ ] sub", 1)
     assert sub is not None and sub.indent == "  ", sub
     assert sub.render() == "  - [ ] sub"
 
     # a line carrying one of trail's fields twice cannot be rendered without
     # losing one of them, so every mutation refuses it by name
-    dup = t.parse_plan_line("- [ ] x [id:: a-aaaa] [id:: b-bbbb]", 7)
+    dup = t.parse_step_line("- [ ] x [id:: a-aaaa] [id:: b-bbbb]", 7)
     assert dup.dupes == ["id"], dup.dupes
     try:
         t.touch(dup)
@@ -578,10 +578,10 @@ def test_plan_line_round_trip():
         assert "twice" in str(e) and "line 7" in str(e), e
 
 
-HAND_EDITED_PLAN = (
+HAND_EDITED_STEPS = (
     '---\nid: demo\ntitle: "Demo"\nlevel: T2\nstatus: active\n---\n'
     "# demo\n"
-    "\n## Plan\n"
+    "\n## Steps\n"
     "<!-- `- [ ]` todo · `- [x]` verified -->\n"
     "### A. parser\n"
     "- [ ] alfa [id:: d-aaaa]\n"
@@ -597,17 +597,17 @@ HAND_EDITED_PLAN = (
 )
 
 
-def test_hand_edited_plan_survives_a_mutation():
-    """Rebuilding `## Plan` from the parsed items would drop the template comment,
+def test_hand_edited_steps_survive_a_mutation():
+    """Rebuilding `## Steps` from the parsed items would drop the template comment,
     the `###` sub-heading and the note under an item, and normalise every line it
     touched. A mutation is allowed to change exactly the one line it changed."""
-    assert [it.text for it in t.parse_plan(HAND_EDITED_PLAN)] == [
+    assert [it.text for it in t.parse_steps(HAND_EDITED_STEPS)] == [
         "alfa", "nested", "beta [priority:: high] [[Design]]"]   # the fence is opaque
-    assert len(t.parse_plan(HAND_EDITED_PLAN.replace("```", "~~~"))) == 3   # ~~~ too
+    assert len(t.parse_steps(HAND_EDITED_STEPS.replace("```", "~~~"))) == 3   # ~~~ too
 
-    new = t.mutate_plan(HAND_EDITED_PLAN,
+    new = t.mutate_steps(HAND_EDITED_STEPS,
                         lambda items: t.transition(items[0], "x", "2026-09-17"))
-    old_lines, new_lines = HAND_EDITED_PLAN.splitlines(), new.splitlines()
+    old_lines, new_lines = HAND_EDITED_STEPS.splitlines(), new.splitlines()
     assert len(old_lines) == len(new_lines), (len(old_lines), len(new_lines))
     diff = [i for i, (o, n) in enumerate(zip(old_lines, new_lines)) if o != n]
     assert len(diff) == 1, [(old_lines[i], new_lines[i]) for i in diff]
@@ -618,7 +618,7 @@ def test_hand_edited_plan_survives_a_mutation():
     assert "<!-- `- [ ]` todo · `- [x]` verified -->" in new
     assert "### A. parser" in new
     # nothing dirty -> the file is returned, not rewritten
-    assert t.mutate_plan(HAND_EDITED_PLAN, lambda items: None) == HAND_EDITED_PLAN
+    assert t.mutate_steps(HAND_EDITED_STEPS, lambda items: None) == HAND_EDITED_STEPS
 
 
 class _FixedRng:
@@ -648,28 +648,28 @@ def test_item_ids():
     assert t.new_item_id("ap", set(), _FixedRng("aaaabbbb")) == "ap-aaaa"
     assert t.new_item_id("ap", {"ap-aaaa"}, _FixedRng("aaaabbbb")) == "ap-bbbb"
 
-    items = [t.parse_plan_line("- [ ] bir [id:: keep-me]", 1),
-             t.parse_plan_line("- [ ] iki", 2)]
+    items = [t.parse_step_line("- [ ] bir [id:: keep-me]", 1),
+             t.parse_step_line("- [ ] iki", 2)]
     given = t.assign_ids(items, "ap", _FixedRng("cccc"))
     assert items[0].fields["id"] == "keep-me" and not items[0].dirty   # malformed, kept
     assert [it.id for it in given] == ["ap-cccc"] and items[1].dirty
 
-    body, n = t.with_plan_ids("- [ ] bir [id:: ap-k4m2]\n- [ ] iki", "ap")
+    body, n = t.with_step_ids("- [ ] bir [id:: ap-k4m2]\n- [ ] iki", "ap")
     assert n == 1
     lines = body.splitlines()
     assert lines[0] == "- [ ] bir [id:: ap-k4m2]", lines        # only id-less lines move
-    new_id = t.parse_plan_line(lines[1], 2).id
+    new_id = t.parse_step_line(lines[1], 2).id
     assert new_id.startswith("ap-") and t.ITEM_ID_RE.match(new_id), new_id
 
     try:
-        t.with_plan_ids("- [ ] bir [id:: ap-k4m2]\n- [ ] iki [id:: ap-k4m2]", "ap")
-        assert False, "a piped plan with two identical ids was accepted"
+        t.with_step_ids("- [ ] bir [id:: ap-k4m2]\n- [ ] iki [id:: ap-k4m2]", "ap")
+        assert False, "a piped body with two identical ids was accepted"
     except t.TrailError as e:
-        assert "duplicate plan id ap-k4m2" in str(e), e
+        assert "duplicate step id ap-k4m2" in str(e), e
 
 
 def _item(line):
-    return t.parse_plan_line(line, 1)
+    return t.parse_step_line(line, 1)
 
 
 def test_transitions_and_blocked_rules():
@@ -770,7 +770,7 @@ def test_transitions_and_blocked_rules():
 
 def test_resolve_item():
     """Picking one of several matches would be a guess dressed as a command, so
-    the refusal has to carry the plan with it - an agent that cannot see the ids
+    the refusal has to carry the steps with it - an agent that cannot see the ids
     cannot name the item on the second try."""
     items = [_item("- [ ] Değer seti hazirla [id:: dg-k4m2]"),
              _item("- [x] eski dg-k4m2 notunu temizle [id:: dg-x7q9]"),
@@ -790,7 +790,7 @@ def test_resolve_item():
         t.resolve_item(items, "yokbunyok")
         assert False, "a query that matches nothing resolved to an item"
     except t.TrailError as e:
-        assert "no plan item matches 'yokbunyok'" in str(e), e
+        assert "no step matches 'yokbunyok'" in str(e), e
         for line in ("  [dg-k4m2] [ ] Değer seti hazirla",
                      "  [dg-x7q9] [x] eski dg-k4m2 notunu temizle",
                      "  [dg-9zzz] [-] seti iptal et"):
@@ -800,19 +800,19 @@ def test_resolve_item():
         t.resolve_item(items, "seti")
         assert False, "an ambiguous query resolved to one item"
     except t.TrailError as e:
-        assert "2 plan items match 'seti' - say which, by id:" in str(e), e
+        assert "2 steps match 'seti' - say which, by id:" in str(e), e
         assert "[dg-k4m2]" in str(e) and "[dg-9zzz]" in str(e), e
         assert "dg-x7q9" not in str(e), e         # only the candidates are listed
 
 
 def _view(*lines):
-    return t.plan_view([t.parse_plan_line(l, i + 1) for i, l in enumerate(lines)])
+    return t.steps_view([t.parse_step_line(l, i + 1) for i, l in enumerate(lines)])
 
 
 BLOCKED = "[blocked:: 2026-09-15] [blocked-reason:: ses yok]"
 
 
-def test_plan_view_selection():
+def test_steps_view_selection():
     """What `status` answers: what is next, what can run beside it, what is stuck.
     A blocked item is never offered as work, and `[/]` next does not mean the item
     is done - the `[ ]` after it is parallel work, not the successor."""
@@ -833,7 +833,7 @@ def test_plan_view_selection():
 
     v = _view("- [ ] bir [id:: a-aaaa] " + BLOCKED, "- [/] iki [id:: a-bbbb] " + BLOCKED)
     assert v["next"] is None and len(v["blocked"]) == 2
-    assert v["complete"] is False                       # blocked holds the plan open
+    assert v["complete"] is False                       # blocked holds the steps open
 
     v = _view("- [x] bir [id:: a-aaaa] [completion:: 2026-09-17]", "- [-] iki [id:: a-bbbb]")
     assert v["complete"] is True and v["next"] is None and v["blocked"] == []
@@ -846,19 +846,20 @@ def test_plan_view_selection():
 # the validator
 # --------------------------------------------------------------------------
 
-VALID_FM = '---\nid: demo\ntitle: "Demo"\nlevel: T1\nstatus: active\n---\n'
-VALID_SECTIONS = ("Goal", "Plan", "Out of Scope", "Status", "Notes",
+VALID_FM = ('---\nid: demo\ntitle: "Demo"\nlevel: T1\nstatus: active\n'
+            'created: 2026-09-01\n---\n')
+VALID_SECTIONS = ("Goal", "Steps", "Out of Scope", "Status", "Notes",
                   "Decision Log", "Open Questions")
 
 
-def vtask(plan="- [ ] adim [id:: d-aaaa]\n", fm=VALID_FM, sections=VALID_SECTIONS):
-    """A minimal valid task file. Frontmatter keys land on lines 2-5 and the plan
-    body starts on line 13, which is what the line numbers below are about."""
+def vtask(steps="- [ ] adim [id:: d-aaaa]\n", fm=VALID_FM, sections=VALID_SECTIONS):
+    """A minimal valid task file. Frontmatter keys land on lines 2-6 and the steps
+    body starts on line 14, which is what the line numbers below are about."""
     body = "# demo\n"
     for s in sections:
         body += "\n## %s\n" % s
-        if s == "Plan":
-            body += plan
+        if s == "Steps":
+            body += steps
         elif s == "Goal":
             body += "tek cumle\n"
     return fm + body
@@ -896,39 +897,39 @@ def test_validate_rules():
         ("missing section", missing_notes, len(missing_notes.splitlines()),
          "missing `## Notes` section"),
         ("duplicated section", dup_section, dup_line, "`## Status` appears more than once"),
-        ("`*` checkbox", vtask(plan="* [ ] adim\n- [ ] ok [id:: d-aaaa]\n"),
-         13, "checkbox with a `*`/`+` bullet"),
-        ("unknown state", vtask(plan="- [?] adim [id:: d-aaaa]\n"),
-         13, "unknown checkbox state [?]"),
-        ("empty text", vtask(plan="- [ ] [id:: d-aaaa]\n"), 13, "plan item has no text"),
-        ("ordered-list trap", vtask(plan="- [ ] 1. adim [id:: d-aaaa]\n"),
-         13, "`1.` after the box starts an ordered list"),
-        ("field twice", vtask(plan="- [ ] adim [id:: d-aaaa] [id:: d-bbbb]\n"),
-         13, "[id:: ] appears twice on the line"),
-        ("empty field value", vtask(plan="- [ ] adim [id::]\n"), 13, "[id:: ] is empty"),
-        ("missing id", vtask(plan="- [ ] adim\n"), 13, "plan item has no [id:: ]"),
-        ("malformed id", vtask(plan="- [ ] adim [id:: NOPE]\n"),
-         13, "[id:: NOPE] is not a trail id"),
-        ("duplicate id", vtask(plan="- [ ] bir [id:: d-aaaa]\n- [ ] iki [id:: d-aaaa]\n"),
-         14, "duplicate id d-aaaa (also on line 13)"),
-        ("[x] without completion", vtask(plan="- [x] adim [id:: d-aaaa]\n"),
-         13, "[x] has no [completion:: ] date"),
-        ("completion on [ ]", vtask(plan="- [ ] adim [id:: d-aaaa] [completion:: 2026-09-17]\n"),
-         13, "[completion:: ] on a [ ] item"),
-        ("bad completion date", vtask(plan="- [x] adim [id:: d-aaaa] [completion:: dun]\n"),
-         13, "[completion:: dun] is not a YYYY-MM-DD date"),
-        ("blocked without reason", vtask(plan="- [ ] adim [id:: d-aaaa] [blocked:: 2026-09-17]\n"),
-         13, "[blocked:: ] without [blocked-reason:: ]"),
+        ("`*` checkbox", vtask(steps="* [ ] adim\n- [ ] ok [id:: d-aaaa]\n"),
+         14, "checkbox with a `*`/`+` bullet"),
+        ("unknown state", vtask(steps="- [?] adim [id:: d-aaaa]\n"),
+         14, "unknown checkbox state [?]"),
+        ("empty text", vtask(steps="- [ ] [id:: d-aaaa]\n"), 14, "step has no text"),
+        ("ordered-list trap", vtask(steps="- [ ] 1. adim [id:: d-aaaa]\n"),
+         14, "`1.` after the box starts an ordered list"),
+        ("field twice", vtask(steps="- [ ] adim [id:: d-aaaa] [id:: d-bbbb]\n"),
+         14, "[id:: ] appears twice on the line"),
+        ("empty field value", vtask(steps="- [ ] adim [id::]\n"), 14, "[id:: ] is empty"),
+        ("missing id", vtask(steps="- [ ] adim\n"), 14, "step has no [id:: ]"),
+        ("malformed id", vtask(steps="- [ ] adim [id:: NOPE]\n"),
+         14, "[id:: NOPE] is not a trail id"),
+        ("duplicate id", vtask(steps="- [ ] bir [id:: d-aaaa]\n- [ ] iki [id:: d-aaaa]\n"),
+         15, "duplicate id d-aaaa (also on line 14)"),
+        ("[x] without completion", vtask(steps="- [x] adim [id:: d-aaaa]\n"),
+         14, "[x] has no [completion:: ] date"),
+        ("completion on [ ]", vtask(steps="- [ ] adim [id:: d-aaaa] [completion:: 2026-09-17]\n"),
+         14, "[completion:: ] on a [ ] item"),
+        ("bad completion date", vtask(steps="- [x] adim [id:: d-aaaa] [completion:: dun]\n"),
+         14, "[completion:: dun] is not a YYYY-MM-DD date"),
+        ("blocked without reason", vtask(steps="- [ ] adim [id:: d-aaaa] [blocked:: 2026-09-17]\n"),
+         14, "[blocked:: ] without [blocked-reason:: ]"),
         ("reason without blocked",
-         vtask(plan="- [ ] adim [id:: d-aaaa] [blocked-reason:: ses yok]\n"),
-         13, "[blocked-reason:: ] without [blocked:: ]"),
+         vtask(steps="- [ ] adim [id:: d-aaaa] [blocked-reason:: ses yok]\n"),
+         14, "[blocked-reason:: ] without [blocked:: ]"),
         ("bad blocked date",
-         vtask(plan="- [ ] adim [id:: d-aaaa] [blocked:: dun] [blocked-reason:: ses yok]\n"),
-         13, "[blocked:: dun] is not a YYYY-MM-DD date"),
+         vtask(steps="- [ ] adim [id:: d-aaaa] [blocked:: dun] [blocked-reason:: ses yok]\n"),
+         14, "[blocked:: dun] is not a YYYY-MM-DD date"),
         ("blocked on [x]",
-         vtask(plan="- [x] adim [id:: d-aaaa] [completion:: 2026-09-17] "
+         vtask(steps="- [x] adim [id:: d-aaaa] [completion:: 2026-09-17] "
                     "[blocked:: 2026-09-17] [blocked-reason:: ses yok]\n"),
-         13, "a resolved item cannot be waiting"),
+         14, "a resolved item cannot be waiting"),
     ]
     for label, text, line, needle in cases:
         found = t.validate_task(text, "demo")
@@ -953,12 +954,139 @@ def test_validate_rules():
         subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
         run(tmp, "init")
         run(tmp, "start", "gecerli", "T2")
-        run_full(tmp, "write", "plan", input="- [ ] bir\n- [ ] iki\n")
+        run_full(tmp, "write", "steps", input="- [ ] bir\n- [ ] iki\n")
         run(tmp, "check", "bir")
         run(tmp, "block", "iki", "ses dosyasi hazir degil")
         f = tmp / ".trail/tasks/gecerli.md"
         assert t.validate_task(f.read_text("utf-8"), "gecerli") == []
         assert "ok: 1 task file valid" in run(tmp, "validate")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_validate_task_dates():
+    """`created` is required and only `trail start` knows it, so its fix is not a
+    `trail set`. What goes unreported is as deliberate as what is reported: a task
+    closed before `completed` existed has no known close date, and a parked task
+    keeps the day it started."""
+    def fm(status, **dates):
+        lines = ["id: demo", 'title: "Demo"', "level: T1", "status: %s" % status]
+        lines += ["%s: %s" % (k, v) if v else "%s:" % k for k, v in dates.items()]
+        return "---\n%s\n---\n" % "\n".join(lines)
+
+    hint = "add `created: YYYY-MM-DD` (the day the file was made)"
+    found = t.validate_task(vtask(fm=fm("active", started="2026-09-02")), "demo")
+    assert found == [(1, "frontmatter: `created` is missing or empty", hint)], found
+    found = t.validate_task(vtask(fm=fm("active", created="")), "demo")
+    assert found == [(6, "frontmatter: `created` is missing or empty", hint)], found
+
+    for key, line in (("created", 6), ("started", 7), ("completed", 8)):
+        dates = {"created": "2026-09-01", "started": "2026-09-02", "completed": "2026-09-03"}
+        dates[key] = "dun"
+        found = t.validate_task(vtask(fm=fm("done", **dates)), "demo")
+        assert [(n, p) for n, p, _ in found] == [
+            (line, "%s 'dun' is not a YYYY-MM-DD date" % key)], (key, found)
+
+    for status in ("open", "active", "blocked"):
+        found = t.validate_task(vtask(fm=fm(status, created="2026-09-01", started="2026-09-02",
+                                            completed="2026-09-03")), "demo")
+        assert found == [(8, "completed is set but the task is not done",
+                          "delete the `completed:` line, or close the task with `trail done`")], found
+
+    assert t.validate_task(vtask(fm=fm("done", created="2026-09-01", started="2026-09-02",
+                                       completed="")), "demo") == []
+    assert t.validate_task(vtask(fm=fm("open", created="2026-09-01",
+                                       started="2026-09-02")), "demo") == []
+
+
+def test_task_dates():
+    """Three different days that `started: {{date}}` used to collapse into one: the
+    file was made, work first began, the task closed. Each is written once, by the
+    move that makes it true, and a day nobody knows is left empty, not made up."""
+    # an empty value is `key:`, the way the template writes it
+    assert t.set_field("---\na: x\n---\n", "a", "") == "---\na:\n---\n"
+    assert t.set_field("---\na: x\n---\n", "b", "") == "---\na: x\nb:\n---\n"
+
+    tmp = Path(tempfile.mkdtemp())
+    today = date.today().isoformat()
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+
+        def line(slug, key):
+            text = (tmp / (".trail/tasks/%s.md" % slug)).read_text("utf-8")
+            return next(l for l in text.splitlines() if l.split(":")[0] == key)
+
+        def edit(slug, key, value):          # a hand edit, or a file an older trail wrote
+            f = tmp / (".trail/tasks/%s.md" % slug)
+            f.write_text(t.set_field(f.read_text("utf-8"), key, value), "utf-8")
+
+        run(tmp, "start", "aktif")
+        assert line("aktif", "created") == "created: " + today
+        assert line("aktif", "started") == "started: " + today
+        assert line("aktif", "completed") == "completed:"      # no trailing space
+        for status in ("open", "blocked"):
+            run(tmp, "start", "park-" + status, "--status", status)
+            assert line("park-" + status, "created") == "created: " + today
+            assert line("park-" + status, "started") == "started:", status
+            assert line("park-" + status, "completed") == "completed:", status
+
+        # the first move into active writes `started`; a later one keeps it
+        run(tmp, "resume", "park-open")
+        assert line("park-open", "started") == "started: " + today
+        run(tmp, "set", "status", "open", "--task", "park-open")
+        edit("park-open", "started", "2026-01-02")
+        run(tmp, "resume", "park-open")
+        assert line("park-open", "started") == "started: 2026-01-02"
+        run(tmp, "start", "planli", "--status", "open")
+        run(tmp, "set", "status", "active", "--task", "planli")
+        assert line("planli", "started") == "started: " + today
+
+        # already active with no `started`: the real day is unknown, so nothing is written
+        edit("aktif", "started", "")
+        run(tmp, "resume", "aktif")
+        run(tmp, "set", "status", "active", "--task", "aktif")
+        assert line("aktif", "started") == "started:"
+
+        # closing dates the task once; closing it again keeps the recorded day
+        run(tmp, "done", "--task", "aktif")
+        assert line("aktif", "completed") == "completed: " + today
+        edit("aktif", "completed", "2026-01-03")
+        run(tmp, "done", "--task", "aktif")
+        assert line("aktif", "completed") == "completed: 2026-01-03"
+        edit("aktif", "completed", "")      # a close from before `completed` existed
+        run(tmp, "done", "--task", "aktif")
+        assert line("aktif", "completed") == "completed:"
+        # reopening clears it; `started` is history and stays
+        run(tmp, "done", "--task", "planli")
+        assert line("planli", "completed") == "completed: " + today
+        run(tmp, "set", "status", "open", "--task", "planli")
+        assert line("planli", "completed") == "completed:"
+        assert line("planli", "started") == "started: " + today
+        shown = json.loads(run(tmp, "show", "planli", "--json"))
+        assert (shown["created"], shown["started"], shown["completed"]) == (today, today, "")
+
+        # the digest header carries each date only when it is set
+        out = run(tmp, "status", "--task", "park-open")
+        assert "Task: park-open (T1, active, created %s, started 2026-01-02)" % today in out, out
+        out = run(tmp, "status", "--task", "park-blocked")
+        assert "Task: park-blocked (T1, blocked, created %s)\n" % today in out, out
+
+        # a template from before `created`: the CLI writes the dates, not {{date}}
+        tpl = tmp / ".trail/_template.md"
+        old = tpl.read_text("utf-8").replace("created:\nstarted:\ncompleted:\n", "started: {{date}}\n")
+        assert "started: {{date}}" in old and "created:" not in old
+        tpl.write_text(old, "utf-8")
+        run(tmp, "start", "eski")
+        run(tmp, "start", "eski-park", "--status", "open")
+        assert line("eski", "created") == "created: " + today
+        assert line("eski", "started") == "started: " + today
+        assert line("eski-park", "created") == "created: " + today
+        assert line("eski-park", "started") == "started:"
+
+        # everything the CLI wrote above is a valid file
+        out = run(tmp, "validate")
+        assert "ok: 6 task files valid" in out, out
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1056,7 +1184,7 @@ def test_log_stdin_contract():
 
 
 def test_item_commands_end_to_end():
-    """The plan stopped being a hand-edited blob: every box is now a command, and
+    """The steps stopped being a hand-edited blob: every box is now a command, and
     the reason a session trusts the result is that a refusal writes nothing and a
     report says exactly which line moved, by id."""
     tmp = Path(tempfile.mkdtemp())
@@ -1066,11 +1194,11 @@ def test_item_commands_end_to_end():
         run(tmp, "init")
         run(tmp, "start", "demo-task", "T2")
         f = tmp / ".trail/tasks/demo-task.md"
-        out = run_full(tmp, "write", "plan",
+        out = run_full(tmp, "write", "steps",
                        input="- [ ] alfa adimi\n- [ ] beta adimi\n"
                              "- [ ] gama adimi\n- [ ] delta adimi\n").stdout
         assert "4 ids assigned" in out, out
-        ids = [it.id for it in t.parse_plan(f.read_text("utf-8"))]
+        ids = [it.id for it in t.parse_steps(f.read_text("utf-8"))]
         assert len(ids) == 4 and len(set(ids)) == 4, ids
         for i in ids:
             assert i.startswith("dt-") and t.ITEM_ID_RE.match(i), i
@@ -1132,7 +1260,7 @@ def test_item_commands_end_to_end():
 
         out = run(tmp, "unblock", "gama")
         assert "unblocked (was %s: ses dosyasi hazir degil)" % today in out, out
-        gama = [it for it in t.parse_plan(f.read_text("utf-8")) if it.id == ids[2]][0]
+        gama = [it for it in t.parse_steps(f.read_text("utf-8")) if it.id == ids[2]][0]
         assert not gama.blocked and gama.state == " ", gama
         assert "- [ ] gama adimi [id:: %s]\n" % ids[2] in f.read_text("utf-8")
 
@@ -1141,29 +1269,29 @@ def test_item_commands_end_to_end():
 
         before = f.read_text("utf-8")
         r = run_full(tmp, "check", "adimi", code=1)
-        assert "4 plan items match 'adimi' - say which, by id:" in r.stderr, r.stderr
+        assert "4 steps match 'adimi' - say which, by id:" in r.stderr, r.stderr
         assert f.read_text("utf-8") == before
         r = run_full(tmp, "check", "yokbunyok", code=1)
-        assert "no plan item matches 'yokbunyok'. The plan:" in r.stderr, r.stderr
+        assert "no step matches 'yokbunyok'. The steps:" in r.stderr, r.stderr
         assert "[%s] [x] alfa adimi" % ids[0] in r.stderr, r.stderr
         assert f.read_text("utf-8") == before
 
         # a parked task is still addressable: --task, like every other writer
         run(tmp, "start", "park", "--status", "open")
-        run_full(tmp, "write", "plan", "--task", "park", input="- [ ] park adimi\n")
+        run_full(tmp, "write", "steps", "--task", "park", input="- [ ] park adimi\n")
         park = tmp / ".trail/tasks/park.md"
 
         # re-piping a body that already carries its ids assigns none, and says so
         # by leaving the count out rather than reporting zero
-        body = t.get_section(park.read_text("utf-8"), "Plan")
-        out = run_full(tmp, "write", "plan", "--task", "park", input=body + "\n").stdout
-        assert out.strip() == "park: ## Plan written (1 line)", out
+        body = t.get_section(park.read_text("utf-8"), "Steps")
+        out = run_full(tmp, "write", "steps", "--task", "park", input=body + "\n").stdout
+        assert out.strip() == "park: ## Steps written (1 line)", out
 
         # two lines carrying the same id: refuse the whole body, write nothing
         before = park.read_text("utf-8")
-        r = run_full(tmp, "write", "plan", "--task", "park", code=1,
+        r = run_full(tmp, "write", "steps", "--task", "park", code=1,
                      input="- [ ] bir [id:: p-aaaa]\n- [ ] iki [id:: p-aaaa]\n")
-        assert "duplicate plan id p-aaaa" in r.stderr, r.stderr
+        assert "duplicate step id p-aaaa" in r.stderr, r.stderr
         assert park.read_text("utf-8") == before
 
         out = run(tmp, "check", "park adimi", "--task", "park")
@@ -1175,25 +1303,25 @@ def test_item_commands_end_to_end():
             "- [-] delta", "- [/] elle eklendi\n- [-] delta"), "utf-8")
         out = run(tmp, "uncheck", "elle eklendi")
         assert "· id assigned" in out, out
-        new_id = [it.id for it in t.parse_plan(f.read_text("utf-8"))
+        new_id = [it.id for it in t.parse_steps(f.read_text("utf-8"))
                   if it.text == "elle eklendi"][0]
         assert new_id.startswith("dt-") and t.ITEM_ID_RE.match(new_id), new_id
         assert "- [ ] elle eklendi [id:: %s]\n" % new_id in f.read_text("utf-8")
 
         run(tmp, "block", "gama", "beklemede")
-        plan = json.loads(run(tmp, "status", "--json"))["tasks"][0]["plan"]
-        assert [p["id"] for p in plan] == ids[:3] + [new_id, ids[3]], plan
-        assert set(plan[0]) == {"id", "state", "text", "line", "completion",
-                                "blocked", "blocked_reason"}, plan[0]
-        by_id = {p["id"]: p for p in plan}
+        steps = json.loads(run(tmp, "status", "--json"))["tasks"][0]["steps"]
+        assert [p["id"] for p in steps] == ids[:3] + [new_id, ids[3]], steps
+        assert set(steps[0]) == {"id", "state", "text", "line", "completion",
+                                 "blocked", "blocked_reason"}, steps[0]
+        by_id = {p["id"]: p for p in steps}
         assert by_id[ids[0]]["state"] == "x" and by_id[ids[0]]["completion"] == today
         assert by_id[ids[2]]["blocked"] == today
         assert by_id[ids[2]]["blocked_reason"] == "beklemede"
         assert by_id[ids[3]]["state"] == "-" and by_id[ids[3]]["completion"] is None
-        assert json.loads(run(tmp, "show", "demo-task", "--json"))["plan"] == plan
+        assert json.loads(run(tmp, "show", "demo-task", "--json"))["steps"] == steps
 
         out = run(tmp, "done")
-        assert "closing with plan items open - deliberate?" in out, out
+        assert "closing with steps open - deliberate?" in out, out
         assert "[%s] [/] beta adimi" % ids[1] in out, out
         assert "[%s] [ ] gama adimi · blocked since %s: beklemede" % (ids[2], today) in out, out
         assert "[%s] [ ] elle eklendi" % new_id in out, out
@@ -1201,8 +1329,8 @@ def test_item_commands_end_to_end():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_plan_complete_nudge():
-    """The plan says nothing is left, the status says work is on: one of them is
+def test_steps_complete_nudge():
+    """The steps say nothing is left, the status says work is on: one of them is
     stale and only a person knows which. A blocked item is not 'left', so the
     nudge has to stay quiet while anything is still waiting."""
     tmp = Path(tempfile.mkdtemp())
@@ -1210,12 +1338,12 @@ def test_plan_complete_nudge():
         subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
         run(tmp, "init")
         run(tmp, "start", "bitti", "T2")
-        run_full(tmp, "write", "plan", input="- [ ] bir\n- [ ] iki\n")
+        run_full(tmp, "write", "steps", input="- [ ] bir\n- [ ] iki\n")
         run(tmp, "check", "bir")
         run(tmp, "cancel", "iki", "gereksiz")
-        nudge = "bitti: every plan item is resolved but the task is still active"
+        nudge = "bitti: every step is resolved but the task is still active"
         out = run(tmp, "status")
-        assert "Next: none - every plan item is resolved" in out, out
+        assert "Next: none - every step is resolved" in out, out
         assert nudge in out, out
 
         f = tmp / ".trail/tasks/bitti.md"
@@ -1228,31 +1356,31 @@ def test_plan_complete_nudge():
         assert nudge not in out, out
         f.write_text(resolved, "utf-8")
 
-        # a task with no plan at all is not nudged either
+        # a task with no steps at all is not nudged either
         run(tmp, "set", "status", "open", "--task", "bitti")
-        run(tmp, "start", "plansiz")
+        run(tmp, "start", "adimsiz")
         out = run(tmp, "status")
-        assert "Task: plansiz" in out and "every plan item is resolved" not in out, out
+        assert "Task: adimsiz" in out and "every step is resolved" not in out, out
 
         run(tmp, "set", "status", "active", "--task", "bitti")
-        run(tmp, "set", "status", "open", "--task", "plansiz")
+        run(tmp, "set", "status", "open", "--task", "adimsiz")
         assert nudge in run(tmp, "status")
         run(tmp, "done", "--task", "bitti")
-        assert "every plan item is resolved" not in run(tmp, "status")
+        assert "every step is resolved" not in run(tmp, "status")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_format_nudge():
     """A file only trail reads is a file nobody checks. The nudge is the only way
-    a session learns that the plan it is about to act on has a line the CLI cannot
+    a session learns that the steps it is about to act on has a line the CLI cannot
     name - and it has to say which command lists them."""
     tmp = Path(tempfile.mkdtemp())
     try:
         subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
         run(tmp, "init")
         run(tmp, "start", "bicim", "T2")
-        run_full(tmp, "write", "plan", input="- [ ] bir\n")
+        run_full(tmp, "write", "steps", input="- [ ] bir\n")
         f = tmp / ".trail/tasks/bicim.md"
         f.write_text(f.read_text("utf-8").replace(
             "## Out of Scope", "- [ ] elle eklendi\n\n## Out of Scope"), "utf-8")
@@ -1264,11 +1392,53 @@ def test_format_nudge():
         r = run_full(tmp, "validate", "--task", "bicim", code=1)
         lines = r.stdout.splitlines()
         assert lines[0] == ".trail/tasks/bicim.md", lines
-        assert lines[1].startswith("  line ") and "plan item has no [id:: ]" in lines[1], lines
+        assert lines[1].startswith("  line ") and "step has no [id:: ]" in lines[1], lines
         head = lines[1].index(": ") + 2
         assert lines[2].startswith(" " * head + "fix: "), lines
-        assert "trail write plan" in lines[2], lines
+        assert "trail write steps" in lines[2], lines
         assert lines[3] == "1 problem in 1 of 1 task file", lines
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_write_plan_is_refused_and_names_steps():
+    """`## Plan` became `## Steps` with no alias: an alias is a second name that every
+    reader and every doc would have to carry for good. The old name fails the way any
+    unknown section does, and the list it prints is where the new name is found."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "eski-ad", "T2")
+        f = tmp / ".trail/tasks/eski-ad.md"
+        before = f.read_text("utf-8")
+        r = run_full(tmp, "write", "plan", code=1, input="- [ ] bir\n")
+        assert "section must be one of: " in r.stderr and "Steps" in r.stderr, r.stderr
+        assert "Plan" not in r.stderr, r.stderr
+        assert f.read_text("utf-8") == before                  # refused, nothing written
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_a_plan_heading_is_not_read_as_steps():
+    """A file that still says `## Plan` is not quietly read under the old name. The
+    validator names the missing section, and `status` shows no steps rather than
+    guessing that the old heading meant the new one."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        run(tmp, "start", "eski-bicim", "T2")
+        run_full(tmp, "write", "steps", input="- [ ] bir\n- [ ] iki\n")
+        f = tmp / ".trail/tasks/eski-bicim.md"
+        f.write_text(f.read_text("utf-8").replace("\n## Steps\n", "\n## Plan\n"), "utf-8")
+        assert "\n## Plan\n" in f.read_text("utf-8")
+
+        r = run_full(tmp, "validate", "--task", "eski-bicim", code=1)
+        assert "missing `## Steps` section" in r.stdout, r.stdout
+        out = run(tmp, "status", "--task", "eski-bicim")
+        assert "Steps:" not in out and "Next:" not in out and "bir" not in out, out
+        assert json.loads(run(tmp, "status", "--json"))["tasks"][0]["steps"] == []
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

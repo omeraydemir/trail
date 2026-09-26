@@ -52,9 +52,9 @@ dates things, it never leaves a section half-written, it keeps `level:` honest.
 | --- | --- |
 | a decision | `trail log "<what>" --why "<why>" --dropped "<rejected alternative>"` |
 | a finding, a measurement, anything worth carrying | `trail note "<what>"` → `## Notes` |
-| `## Goal`, `## Out of Scope`, `## Plan`, `## Open Questions` | `trail write <section>` — body on stdin |
-| a plan item's state | `trail check <item>` → `[x]`, dated · `trail check <item> --partial` → `[/]` · `trail uncheck <item>` → `[ ]` · `trail cancel <item> "<why>"` → `[-]` |
-| a plan item that cannot move | `trail block <item> "<why>"` · `trail unblock <item>` |
+| `## Goal`, `## Out of Scope`, `## Steps`, `## Open Questions` | `trail write <section>` — body on stdin |
+| a step's state | `trail check <item>` → `[x]`, dated · `trail check <item> --partial` → `[/]` · `trail uncheck <item>` → `[ ]` · `trail cancel <item> "<why>"` → `[-]` |
+| a step that cannot move | `trail block <item> "<why>"` · `trail unblock <item>` |
 | `## Status` | `trail handoff "<where you stopped + next step>"` |
 | a reference doc or code path | `trail link <path…>` |
 | `status`, `level`, `title`, `group` | `trail set <field> <value>` |
@@ -65,7 +65,7 @@ dates things, it never leaves a section half-written, it keeps `level:` honest.
 
 `<item>` is an id — `ap-k4m2`, as `status` prints it — or a piece of the item's
 text. One match acts. Zero or several are refused with the candidates listed, never
-guessed: say which, by id. Ids come from `trail write plan`, which gives every
+guessed: say which, by id. Ids come from `trail write steps`, which gives every
 `- [ ]` line without one an `[id:: …]`. Never invent an id by hand and never change
 one: the id is what keeps a reworded line the same item.
 
@@ -104,20 +104,20 @@ session, for detail you almost never need. So climb:
 | where am I, what is next, what is blocked | `trail status` | ~15 lines |
 | what the last session left in `## Notes` | `trail notes [-n N]` — last 5 by default, `--all` for every one | the entries, not the file |
 | why a recent decision went that way | `trail status --full` | + the why/dropped bodies |
-| the boundary, the open questions, the whole plan | `trail show <slug>` | the file |
+| the boundary, the open questions, every step | `trail show <slug>` | the file |
 | to edit a section by hand | read the file | the file |
 | where a task you are *not* on stands | `trail status --task <slug>` | ~15 lines |
 | which tasks exist, in what shape | `trail ls`, `trail board` — both narrow to the active task's group; `--all` or `--group <g>` to widen | a few lines |
 | whether something was already decided, tried or rejected | `trail search <text>` — every task, the archive included | the matching entries |
 
-`status` prints plan items as `[ap-k4m2] [/] text`, then picks for you. **Next** is
+`status` prints steps as `[ap-k4m2] [/] text`, then picks for you. **Next** is
 the first unresolved, unblocked item. **Can continue with** appears only when Next is
 `[/]` — written, waiting on verification — and names the first `[ ]` after it:
 parallel work while the check is pending, not a claim that Next is done. **Blocked**
 lists every blocked item with its date and reason; a blocked item is never Next, and
 when nothing else remains status says so rather than choosing one. It also nudges
-when every item is resolved but the task is still active (`trail done`, or add what
-remains to the plan) and when the file no longer passes `trail validate`.
+when every step is resolved but the task is still active (`trail done`, or add what
+remains to `## Steps`) and when the file no longer passes `trail validate`.
 
 Search with `trail search`, not with `rg`: this format's unit is an entry, not a
 line. A decision's `why:` and `dropped:` are indented under a title line, so a
@@ -154,14 +154,14 @@ context": name what you are missing and take the step that answers it.
    permanent document under `docs/` is the user's call, and they will ask.
 5. **Never summarize the session.** `trail handoff` rewrites `## Status`: where you
    stopped, what is next. The reasoning is already in the log.
-6. **Tick the box when it is true.** `## Plan` items have four states: `[ ]` not
+6. **Tick the box when it is true.** `## Steps` lines have four states: `[ ]` not
    started · `[/]` written but not verified · `[x]` **verified** · `[-]` cancelled,
    with why it fell out of scope in the text. `[x]` is not "I wrote the code";
    `trail check` writes it and dates it, so the next session reads the boxes instead
    of re-reading the code. Blocked is not a fifth box but metadata on the line,
    independent of the box — `[/]` + blocked is the normal shape of "written, waiting
    on something". So a blocked item is `trail block <item> "<why>"`: not `[-]`, which
-   says it left the scope, and not a note repeating the plan line, which goes stale
+   says it left the scope, and not a note repeating the step, which goes stale
    on its own. Never write `- [ ] 1. …`: a digit and a dot after the box start an
    ordered list inside the item and the checkbox stops rendering. A numbered step is
    `- [ ] **1.** …`.
@@ -173,7 +173,7 @@ context": name what you are missing and take the step that answers it.
 ## Levels, and starting one task
 
 **T0** small work — nothing, anywhere · **T1** 2-3 sessions · **T2** multi-day, and
-its file carries a `## Plan`. Size decides whether there is a file; deferral decides
+its file carries a `## Steps`. Size decides whether there is a file; deferral decides
 whether there is a trace, which for small work is one backlog line. One task starts
 like this:
 
@@ -181,7 +181,7 @@ like this:
 trail start <slug> [T1|T2]                 # active at once; --status open parks it
 printf '%s\n' "<goal>"                   | trail write goal
 printf '%s\n' "<boundary>"               | trail write scope
-printf -- '- [ ] %s\n' "<step>" "<step>" | trail write plan    # assigns the ids
+printf -- '- [ ] %s\n' "<step>" "<step>" | trail write steps   # assigns the ids
 ```
 
 Several tasks from one source — a document, a spec, a backlog, a brain dump — is

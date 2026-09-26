@@ -10,8 +10,8 @@ argument-hint: <file…> | <pasted notes>
 it into tasks and backlog lines, then stop — working on a task is `/trail <slug>`.
 
 A task file (`.trail/tasks/<slug>.md`) carries one piece of work across the sessions
-it takes to finish: goal, boundary, a `## Plan` of checkboxes, where it stopped, and a
-decision log. Git already holds every line that shipped; what it cannot hold is the
+it takes to finish: goal, boundary, its `## Steps` as checkboxes, where it stopped, and
+a decision log. Git already holds every line that shipped; what it cannot hold is the
 alternative that was considered and rejected, because rejected code is never
 written. That is the log's `dropped:` field, and it is why the format exists. The
 test for every rule below is the same one: **does this make the next session cheaper
@@ -27,14 +27,14 @@ They are separate axes, and conflating them is what loses work:
 | **Small** | T0 — nothing, anywhere | one line in `.trail/backlog.md` |
 | **Large** | T1/T2, `status: active` | T1/T2, `status: open` |
 
-**T1** 2-3 sessions · **T2** multi-day, and its file carries a `## Plan`.
+**T1** 2-3 sessions · **T2** multi-day, and its file carries a `## Steps`.
 
 When work has several phases, the test for splitting it is not size and not the
 number of phases:
 
 > **When you sit down to phase 3, do phase 1's decisions need to be in your head?**
 
-- **Yes** → one T2 task. Phases are checkboxes under `## Plan`.
+- **Yes** → one T2 task. Phases are checkboxes under `## Steps`.
 - **No**, the phases are worked independently → separate tasks, one `group:`.
 
 Both answers cost something, so answer the question rather than reaching for a
@@ -100,7 +100,7 @@ of two buckets — a task file, or a backlog line. There is no third bucket. An 
 left in your reply as "T0, no file needed" is the failure this procedure exists to
 prevent: the user approves the plan and their sentence is gone.
 
-**4. Where the detail goes.** A long plan does not belong in `## Plan`.
+**4. Where the detail goes.** A long plan does not belong in `## Steps`.
 
 - The source is already a document in the repo → do not copy it. `trail link` it.
 - No document, and the detail is the kind you would *look up* rather than
@@ -115,13 +115,13 @@ prevent: the user approves the plan and their sentence is gone.
 trail start <slug> <level> --title "<title>" --status open [--group <shared slug>]
 printf '%s\n' "<goal from the source>"   | trail write goal --task <slug>
 printf '%s\n' "<boundary>"               | trail write scope --task <slug>
-printf -- '- [ ] %s\n' "<step>" "<step>" | trail write plan --task <slug>
+printf -- '- [ ] %s\n' "<step>" "<step>" | trail write steps --task <slug>
 trail link docs/<the design>.md --task <slug>
 trail log "scope from <source>" --task <slug> --dropped "<left out, and why>"
 trail backlog "<each small item>" --task <slug>
 ```
 
-`trail write plan` gives every `- [ ]` line an `[id:: …]` — the handle `trail check`
+`trail write steps` gives every `- [ ]` line an `[id:: …]` — the handle `trail check`
 and `trail block` take from then on. Never write an id by hand and never change one.
 
 Pass `--group` on every task of a multi-task run: it is the only thing that will tell

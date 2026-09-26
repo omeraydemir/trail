@@ -3,7 +3,9 @@ id: {{id}}
 title: "{{title}}"
 level: {{level}}
 status: {{status}}
-started: {{date}}
+created:
+started:
+completed:
 group:
 links: []
 ---
@@ -12,9 +14,9 @@ links: []
 ## Goal
 <!-- One sentence: what makes this done. -->
 
-## Plan
+## Steps
 <!-- `- [ ]` todo · `- [/]` written, not verified · `- [x]` verified · `- [-]` cancelled -->
-<!-- `trail write plan` assigns `[id:: …]`; `trail check` / `trail block` keep the other fields. Never write an id by hand. -->
+<!-- `trail write steps` assigns `[id:: …]`; `trail check` / `trail block` keep the other fields. Never write an id by hand. -->
 
 ## Out of Scope
 <!-- An explicit boundary against scope creep. -->

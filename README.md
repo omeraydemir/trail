@@ -23,7 +23,7 @@ lossy end-of-session reconstruction.
 | --- | --- | --- |
 | T0 | single session, cheap to undo | **nothing** — unless deferred, then one backlog line |
 | T1 | 2-3 sessions, one topic | task file + close |
-| T2 | multi-day, architectural | + a checkbox `## Plan` + handoff each session |
+| T2 | multi-day, architectural | + a checkbox `## Steps` + handoff each session |
 
 T0 must stay free. A process system dies from taxing trivial work, so small work
 you are actually doing leaves no trace at all. `trail backlog` is for the other
@@ -83,6 +83,7 @@ EOF
 trail note "12 widgets, 9.6s cold, phases are serial"   # findings, free-form
 trail notes                             # the last five of them (-n N, --all)
 trail handoff "parser done, wiring the receiver next"
+printf -- '- [ ] parse the URL\n' | trail write steps   # checkboxes; each gets an id
 trail check "parse the URL"             # [x] + completion date; id or a piece of the text
 trail check dh-k4m2 --partial           # [/] written, not verified
 trail uncheck dh-k4m2                   # back to [ ]
@@ -100,13 +101,13 @@ trail validate                          # every task file against the format
 trail done                              # mark done, report the backlog around it
 ```
 
-`## Plan` items are checkboxes — `[ ]` not started, `[/]` written but not verified,
-`[x]` verified, `[-]` cancelled — and each carries an id that `trail write plan`
-assigns (`[id:: dh-k4m2]`; never write one by hand). `status` prints
-`[dh-k4m2] [/] …` and the item commands take the id or a piece of the text, so an
-item is addressed without opening the file; `ls` reports the count, so "where did we
-stop" is answered without opening anything. Prefer the commands, but the files are
-yours: when the CLI cannot express what you mean, edit them, just keep the format
+`## Steps` is a list of checkboxes — `[ ]` not started, `[/]` written but not
+verified, `[x]` verified, `[-]` cancelled — and each carries an id that
+`trail write steps` assigns (`[id:: dh-k4m2]`; never write one by hand). `status`
+prints `[dh-k4m2] [/] …` and the step commands take the id or a piece of the text,
+so a step is addressed without opening the file; `ls` reports the count, so "where
+did we stop" is answered without opening anything. Prefer the commands, but the files
+are yours: when the CLI cannot express what you mean, edit them, just keep the format
 intact — `trail validate` says when you did not.
 
 `trail ls`, `trail show` and `trail status` take `--json`.
@@ -128,7 +129,7 @@ The task file is what every session starts by reading — as a `trail status` di
 not the file itself — so it holds only what you need in your head: goal, boundary,
 position, decisions. Anything you *consult* rather than
 remember — a design, a spec, a long plan — lives in its own document under `docs/`
-and is attached with `trail link`. Pouring a two-week design into `## Plan` breaks
+and is attached with `trail link`. Pouring a two-week design into `## Steps` breaks
 the file and pollutes every session with detail you are not using yet.
 
 When work has phases, the test for splitting is not size:
@@ -136,7 +137,7 @@ When work has phases, the test for splitting is not size:
 > When you sit down to phase 3, do you need phase 1's status and decisions in your
 > head?
 
-**Yes** → one T2 task, phases as checkboxes under `## Plan`. Ten phases still means
+**Yes** → one T2 task, phases as checkboxes under `## Steps`. Ten phases still means
 one file — splitting it splits the context you were trying to carry. **No** →
 separate tasks, with order in the slug prefix (`auth-1-provider`, `auth-2-session`)
 and a shared `group:` in the frontmatter. Tasks sort by `(status, id)`, so the prefix
@@ -183,8 +184,8 @@ stale_days: 7
 ```
 
 Custom frontmatter fields go in `_template.md`, not in config. The CLI reads only
-`id` `title` `level` `status` `started` `group` `links`; everything else is yours
-and is preserved on write.
+`id` `title` `level` `status` `created` `started` `completed` `group` `links`, and
+writes the three dates itself; everything else is yours and is preserved on write.
 
 ## Nudges
 
@@ -192,7 +193,7 @@ and is preserved on write.
 have fired for the answer to be right.
 
 - task file untouched for `stale_days` → *still active? close it or continue*
-- every plan item resolved but the task still active → *close it, or add what is left*
+- every step resolved but the task still active → *close it, or add what is left*
 - format problems in a live task file → *`trail validate --task <id>` lists them*
 - a scaffold file this repo predates is missing → *run `trail init`*
 

@@ -14,6 +14,7 @@ links: []
 
 ## Plan
 <!-- `- [ ]` todo · `- [/]` written, not verified · `- [x]` verified · `- [-]` cancelled -->
+<!-- `trail write plan` assigns `[id:: …]`; `trail check` / `trail block` keep the other fields. Never write an id by hand. -->
 
 ## Out of Scope
 <!-- An explicit boundary against scope creep. -->

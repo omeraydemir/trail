@@ -38,7 +38,9 @@ id: push-notification-deeplink
 title: "push notification: deeplink"
 level: T1
 status: active
+created: 2026-08-25
 started: 2026-08-27
+completed:
 group: notifications
 links:
   - src/Notifications/DeepLinkHandler.cs:120
@@ -46,7 +48,7 @@ links:
 # push notification deeplink
 
 ## Goal
-## Plan
+## Steps
 ## Out of Scope
 ## Status
 ## Notes
@@ -56,16 +58,16 @@ links:
 
 The order is the reading order. A person opening this file asks "what is this, what
 is left, where am I" — in that sequence, and the answer to each has to be above the
-fold. Goal and Plan sit together because they are the same question at two
+fold. Goal and Steps sit together because they are the same question at two
 resolutions. `## Out of Scope` is a guardrail you consult, not a thing you act on, so
 it follows them. The decision log is long and archival, so it sits below everything
 you came for.
 
 ### Core fields
 
-`id` · `title` · `level` · `status` · `started` · `group` · `links` are the only
-fields the CLI reads. Everything else is free — add fields to `_template.md` and
-nothing breaks.
+`id` · `title` · `level` · `status` · `created` · `started` · `completed` · `group` ·
+`links` are the only fields the CLI reads. Everything else is free — add fields to
+`_template.md` and nothing breaks.
 
 - `title` is **always written quoted**. Titles carry colons ("Report: pivot matrix")
   and a bare colon makes the whole block invalid YAML — which is how two of the five
@@ -76,6 +78,20 @@ nothing breaks.
 - `level` is `T1` or `T2`. T0 has no task file and no representation anywhere:
   small work being done now leaves no trace. `backlog.md` holds the other case,
   small work that is deferred.
+- `created` is the day the task file was made. `trail start` writes it once, and
+  nothing changes it afterwards.
+- `started` is the first day the task became `active`, written by whichever of
+  `trail start`, `trail resume` or `trail set status active` gets it there first and
+  never overwritten — parking the task again keeps it. It is not the creation date: a
+  task a planning run parks as `open` can wait weeks before anyone picks it up, and a
+  `started` that meant "created" put it weeks into its work on the day it began.
+  `resume` on a task already `active` with no `started` writes nothing; the real day
+  is unknown, and today would be false data.
+- `completed` is the day the task was closed, written by `trail done`. Closing a task
+  that is already done keeps the recorded date; `trail set status` moving it out of
+  `done` clears it. A `completed` on a task that is not done is reported; a closed
+  task without one is not — closes from before the field have no known date, and
+  inventing one is false data.
 - `group` is an optional slug shared by the tasks one `plan` run produced. It is a
   label, not a list of children: nothing points at anything, so nothing goes stale.
   `ls` sections by it, and anything reading frontmatter from outside — a Dataview
@@ -87,7 +103,7 @@ There is still no parent task, no subtask, no dependency graph and no index file
 listing children. `group` carries the only relation that survived contact with real
 use: *these came from the same plan*.
 
-### Plan items are checkboxes
+### Steps are checkboxes
 
 ```markdown
 - [x] measure the run shape on device [id:: ap-3f1k] [completion:: 2026-09-11]
@@ -113,31 +129,31 @@ Obsidian vault queries them without a plugin. trail owns exactly four:
 
 | Field | Written by | Present when |
 | --- | --- | --- |
-| `id` | `trail write plan`, or an item command that rewrites an id-less line | always, once the CLI has seen the line; the validator reports a line without one |
+| `id` | `trail write steps`, or an item command that rewrites an id-less line | always, once the CLI has seen the line; the validator reports a line without one |
 | `completion` | `trail check`; removed by `check --partial`, `uncheck`, `cancel` | the item is `[x]` |
 | `blocked` | `trail block`; removed by `trail unblock` | the item is waiting; the value is the date it started waiting |
 | `blocked-reason` | `trail block`, alongside `blocked` | whenever `blocked` is. One line, no `]` — an inline field cannot nest a bracket |
 
 An id is `<initials of the slug's parts>-<four random [a-z0-9]>`: the task
-`auth-provider` gets `ap-k4m2`, `user-1-profile` gets `u1p-9x7b`. `trail write plan`
+`auth-provider` gets `ap-k4m2`, `user-1-profile` gets `u1p-9x7b`. `trail write steps`
 assigns one to every checkbox line that has none, and an item command that rewrites
 an id-less line assigns one on the way (its report says `· id assigned`). Once written
 an id never changes — the prefix is not checked against the slug afterwards, so a
-task can be renamed or its plan copied without touching them — and it is unique
+task can be renamed or its steps copied without touching them — and it is unique
 within one file, nowhere else. Never write one by hand: the validator reports a
 malformed or duplicated id, and the CLI regenerates nothing.
 
-Ids exist so that a plan item can be addressed from the CLI without opening the file.
+Ids exist so that a step can be addressed from the CLI without opening the file.
 The text is what a person reads, and it changes — reworded, translated, given a
 reason — while the id is what a command and a `status` line point at, and it does
 not.
 
 The fields are read from anywhere on the line and written back after the text;
 fields already on the line keep their order, new ones are appended — except an id
-assigned on the way, which leads them, as `write plan` writes it. Any other
+assigned on the way, which leads them, as `write steps` writes it. Any other
 `[key:: value]`, a `[[wikilink]]`, an HTML comment — all text, preserved byte for
 byte. Only `- ` bullets are items (`* [ ]` is a list to Markdown and nothing to
-trail); indented checkboxes are items too; a fenced code block inside `## Plan`, and
+trail); indented checkboxes are items too; a fenced code block inside `## Steps`, and
 inline code on an item's line, are opaque whatever they contain; `X` reads as `x`.
 
 Nothing else goes between the box and the text. `- [ ] 1. Measure first` opens an
@@ -150,7 +166,7 @@ code, and the reader learns what is left without cross-referencing `## Status`
 against a prose list. `ls` reports `verified / live` per task, where `[-]` leaves the
 denominator — cancelled is resolved, not pending.
 
-### Plan item commands
+### Step commands
 
 ```bash
 trail check <item>              # [x] + [completion:: today]
@@ -190,8 +206,8 @@ verification — **Can continue with** offers the first non-blocked `[ ]` after 
 work that can go on meanwhile, not a claim that Next is done. **Blocked** lists every
 unresolved blocked item with its date and reason; a blocked item is never Next. When
 nothing is open the line says which kind of nothing:
-`Next: none - every remaining item is blocked` holds the plan open,
-`Next: none - every plan item is resolved` means it is time for `trail done`.
+`Next: none - every remaining item is blocked` holds the steps open,
+`Next: none - every step is resolved` means it is time for `trail done`.
 
 ### Writes are serialised
 
@@ -206,8 +222,8 @@ report success — fifty concurrent writes landed forty.
 - **2026-09-11** · fullscreen is a pushed page, not a modal
   - **why:** nothing in the repo uses PushModalAsync; a pushed page gets the
     hardware back button for free
-  - **dropped:** the plan's "(modal)" note — a second navigation pattern with no
-    precedent in the module
+  - **dropped:** the plan document's "(modal)" note — a second navigation pattern
+    with no precedent in the module
 ```
 
 One scannable title line, the reasons indented under it. The old one-line form put
@@ -268,7 +284,7 @@ That constraint — read once per session, cheaply — is what divides the mater
 | What you must hold in your head each session — goal, boundary, position, decisions | the task file | yes, as a digest |
 | What you consult when you reach that part — designs, specs, long plans | a reference document | no, linked |
 
-`links:` is that bridge. A two-week design poured into `## Plan` breaks both halves:
+`links:` is that bridge. A two-week design poured into `## Steps` breaks both halves:
 the file stops answering "where am I", and the detail is re-read every session.
 
 A reference document lives under the repo's own docs convention, never inside
@@ -286,7 +302,7 @@ The test is not size and not phase count:
 > When you sit down to phase 3, do you need phase 1's status and decisions in your
 > head?
 
-- **Yes** → one T2 task, phases as checkboxes under `## Plan`.
+- **Yes** → one T2 task, phases as checkboxes under `## Steps`.
 - **No** → separate tasks sharing one `group:`.
 
 Neither answer is the default, because both errors are real and they are opposite.
@@ -316,6 +332,11 @@ stored copy has a second source of truth and task files are hand-editable.
 `trail start` substitutes `{{id}}` `{{title}}` `{{level}}` `{{status}}` `{{date}}`.
 **Unrecognized placeholders are left untouched**, so custom fields are safe.
 
+The three dates are not placeholders. The CLI writes `created`, `started` and
+`completed` itself, the way `start` writes `title` and `group`, so the template only
+says where they sit — and an older template's `started: {{date}}` still comes out
+right. `{{date}}` remains a placeholder for the body.
+
 ## Config
 
 Flat YAML. Keys: `backlog` `dir` `template` `stale_days`, plus the legacy `archive`,
@@ -332,7 +353,7 @@ status.
 
 trail reads a controlled subset of the file and passes everything else through: the
 frontmatter, the known `##` sections (found by heading), the checkbox lines inside
-`## Plan`, and on those lines the four inline fields. Prose under a heading, a `###`
+`## Steps`, and on those lines the four inline fields. Prose under a heading, a `###`
 sub-heading, an HTML comment, a wikilink, an inline field trail does not own, a
 fenced code block — opaque, and preserved byte for byte. The file is hand-editable,
 so the CLI has to be a guest in it.
@@ -341,7 +362,7 @@ Frontmatter is read with a flat YAML subset: scalars, `- item` lists, `#` commen
 A key with an empty value reads as an empty list.
 
 **Writes are surgical.** A command replaces a single frontmatter line by regex, one
-section body, or a single plan line — never a file reserialised from what the parser
+section body, or a single step line — never a file reserialised from what the parser
 understood, which would drop every comment and normalise every line it had merely
 read. Comments, ordering and fields it does not understand survive untouched.
 
@@ -349,7 +370,7 @@ read. Comments, ordering and fields it does not understand survive untouched.
 
 `trail validate` checks every file in `.trail/tasks/` (a legacy `archive/` is
 skipped; `--task <slug>` narrows to one) against this contract and nothing more: the
-frontmatter, the required sections, the plan items and their fields. It is not a
+frontmatter, the required sections, the steps and their fields. It is not a
 Markdown linter. `## Notes` has no rules, the decision log and the backlog are not
 checked, and a section or field the CLI does not read is not its business.
 
@@ -358,9 +379,9 @@ the CLI or it does not:
 
 | Where | Findings |
 | --- | --- |
-| frontmatter | block missing; `id` `title` `level` `status` missing or empty; `id` not the file name; an unquoted `title` that is not valid YAML; `level` not T1/T2; `status` outside the set; `started` not a date; `links` not a list |
+| frontmatter | block missing; `id` `title` `level` `status` `created` missing or empty; `id` not the file name; an unquoted `title` that is not valid YAML; `level` not T1/T2; `status` outside the set; `created`, `started` or `completed` not a date; `completed` on a task that is not done; `links` not a list |
 | sections | one of the seven required headings missing or repeated — order is not checked, the CLI does not depend on it |
-| plan items | a `*`/`+` checkbox bullet; an unknown box state; empty text; the `1.` ordered-list trap; a trail field twice on a line; an empty field value; an id missing, malformed or duplicated; `[x]` without `completion`; `completion` on a non-`[x]`; a date that is not `YYYY-MM-DD`; `blocked` without a reason, or a reason without `blocked`; blocked on a resolved item |
+| steps | a `*`/`+` checkbox bullet; an unknown box state; empty text; the `1.` ordered-list trap; a trail field twice on a line; an empty field value; an id missing, malformed or duplicated; `[x]` without `completion`; `completion` on a non-`[x]`; a date that is not `YYYY-MM-DD`; `blocked` without a reason, or a reason without `blocked`; blocked on a resolved item |
 
 Output is grouped per file, each finding with its line and the command that fixes
 it; exit 1 when anything is found, `ok: N task files valid` otherwise:
@@ -369,13 +390,13 @@ it; exit 1 when anything is found, `ok: N task files valid` otherwise:
 .trail/tasks/auth-provider.md
   line 18: [x] has no [completion:: ] date
            fix: trail uncheck <id> && trail check <id> re-dates it, or add [completion:: YYYY-MM-DD]
-  line 21: plan item has no [id:: ]
-           fix: `trail write plan` assigns ids to lines without one (re-pipe the section); do not invent ids by hand
+  line 21: step has no [id:: ]
+           fix: `trail write steps` assigns ids to lines without one (re-pipe the section); do not invent ids by hand
 2 problems in 1 of 3 task files
 ```
 
 Nothing is repaired and there is no legacy migration: a file from before ids is
-brought up by hand — re-pipe its plan through `trail write plan` — and the validator
+brought up by hand — re-pipe its steps through `trail write steps` — and the validator
 describes the target format rather than guessing at the origin. A live task that
 fails is also one line in `trail status`; see Nudges.
 
@@ -387,7 +408,7 @@ to have fired for the state to be correct.
 | Condition | Signal |
 | --- | --- |
 | Abandoned task | task file mtime older than `stale_days` |
-| Plan finished, task not | every item `[x]` or `[-]`, none blocked, and the task still `active` — one of the two is stale, and only a person knows which. Trail data only: not git, not the clock |
+| Steps finished, task not | every item `[x]` or `[-]`, none blocked, and the task still `active` — one of the two is stale, and only a person knows which. Trail data only: not git, not the clock |
 | Format problems in a live task | `trail validate` finds anything in an active or blocked task file; one line, naming the command |
 
 trail never runs git — no commits, no `HEAD`, no history, and no freshness derived
