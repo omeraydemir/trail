@@ -1,6 +1,0 @@
-# .trail/config.yml — every key is optional; the values shown are the defaults.
-
-dir: .trail/tasks        # every task, open through done
-archive: .trail/archive  # legacy: still read, never written
-template: .trail/_template.md
-stale_days: 7            # a task untouched this long counts as stale
