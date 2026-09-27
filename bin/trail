@@ -1450,6 +1450,14 @@ def cmd_done(args) -> int:
               % (task["id"], len(open_items), len(done_items)))
         for item in open_items:
             print(c("           still open: %s" % item, "warn"))
+    # The close is when a linked plan doc goes stale - one said "not started" after
+    # its nine tasks had closed. A nudge: trail writes nothing there. Only .md, since
+    # linked code and prototypes carry no status; `plan.md:40` still points into one.
+    docs = [l for l in task["links"] if re.sub(r":\d+$", "", l).lower().endswith(".md")]
+    if docs:
+        print("docs:    if one of these states this work's status, update it")
+        for doc in docs:
+            print(c("           %s" % doc, "warn"))
     return 0
 
 

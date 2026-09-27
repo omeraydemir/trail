@@ -1371,6 +1371,35 @@ def test_steps_complete_nudge():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_done_nudges_linked_docs():
+    """A plan doc said "not started" after the nine tasks implementing it had
+    closed. The close is the moment its status changes, so `done` names the linked
+    documents - only .md: code and a prototype carry no status - and writes nothing
+    to them."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
+        run(tmp, "init")
+        nudge = "docs:    if one of these states this work's status, update it"
+        run(tmp, "start", "baglantisiz")
+        assert "docs:" not in run(tmp, "done")
+        run(tmp, "start", "kodlu")
+        run(tmp, "link", "lib/ui/theme.dart", "Views/Page.xaml.cs:120", "design/proto.html")
+        assert "docs:" not in run(tmp, "done")
+
+        (tmp / "docs").mkdir()
+        plan = tmp / "docs/plan.md"
+        plan.write_text("Durum: analiz, kod yazilmadi\n", "utf-8")
+        run(tmp, "start", "belgeli")
+        run(tmp, "link", "lib/ui/theme.dart", "docs/plan.md", "docs/Tasarim.MD:40")
+        lines = run(tmp, "done").splitlines()
+        at = lines.index(nudge)
+        assert lines[at + 1:] == ["           docs/plan.md", "           docs/Tasarim.MD:40"], lines
+        assert plan.read_text("utf-8") == "Durum: analiz, kod yazilmadi\n"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_format_nudge():
     """A file only trail reads is a file nobody checks. The nudge is the only way
     a session learns that the steps it is about to act on has a line the CLI cannot

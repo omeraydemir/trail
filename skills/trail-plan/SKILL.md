@@ -9,6 +9,10 @@ argument-hint: <file…> | <pasted notes>
 `/trail-plan <file…>`, or a pasted brain dump. The user brings raw material; you turn
 it into tasks and backlog lines, then stop — working on a task is `/trail <slug>`.
 
+The material is an approved plan or a short list of notes, not a roadmap. This skill
+decides how work is cut into tasks; what a release contains is product planning, and
+that comes first. Step 3 is where you tell the two apart.
+
 A task file (`.trail/tasks/<slug>.md`) carries one piece of work across the sessions
 it takes to finish: goal, boundary, its `## Steps` as checkboxes, where it stopped, and
 a decision log. Git already holds every line that shipped; what it cannot hold is the
@@ -78,19 +82,55 @@ git log --oneline --since=<that date>          # what happened since
 
 Then read the commits that touch what the document describes. A document saying
 "Status: not started" while a 30-file commit already implements it will otherwise
-send you planning work that is finished. When the document and the code disagree,
-**the code is right.**
+send you planning work that is finished. When the document and the code disagree on
+a fact — what exists, what is done — **the code is right.** When they disagree on
+intent, the code says only what was built, not what was meant: that is a question for
+step 3.
 
-**3. Show the proposal, divergences first.** Three blocks, in this order:
+**3. Clarify what the source leaves undecided.** Before proposing tasks, list what the
+source leaves open: items it marks as a proposal or an open question, the places where
+step 2 found the document and the code apart in intent (on facts, the code has
+already answered), and scope boundaries such as what goes into the next release. If
+nothing is open, say so in one line and move on.
 
-- *Divergences* — every place the source disagrees with the repo: already done,
-  wrong estimate, superseded decision. A plan approved without this schedules work
-  that already exists.
+- Ask only what changes the plan: the task split, a phase boundary, a step. The rest
+  stays an open question in the source, is named in the proposal, and is not asked
+  now.
+- One decision per question, multiple choice where it can be: two or three options,
+  the recommended one first with a one-line reason, each saying what the source
+  proposes and what the code does today. Independent questions can go together, four
+  at most; a question whose options depend on an earlier answer waits for it.
+- Questions that change the task split first, details after. If those alone are more
+  than four, the source is a roadmap, not a plan: stop, and say that it needs product
+  planning — release scope, milestones — before it can be cut into tasks. A few scope
+  questions are normal and cheap to ask; a split that hangs on more means the
+  deciding has not been done, and doing it here is how a task ledger ends up choosing
+  a release.
+- Record each answer where the repo keeps its decisions (its `CLAUDE.md` or
+  `AGENTS.md` says where) and update the mark in the source, so the next reader sees
+  it was decided. trail has no decision record of its own and does not start one: with
+  no such place, the answer goes beside the mark in the source document, and when the
+  source is not a document, into the log of the group's first task. The options not
+  chosen go into the `--dropped` of the first `trail log` entry of the task they
+  shaped, in step 6; when the question shaped the whole plan, they are a plan-wide
+  cut, and step 6 says where those go.
+- An unanswered question is never assumed. It enters the proposal as an open
+  question and holds only the tasks that depend on it: those are still created, with
+  their first dependent step blocked in step 6. An assumed answer is a decision
+  nobody made, and once it is in a task file it reads like one somebody did.
+
+**4. Show the proposal, divergences first.** Three blocks, in this order:
+
+- *Divergences* — every place the source disagrees with the repo on a fact: already
+  done, wrong estimate, superseded decision. A plan approved without this schedules
+  work that already exists. Facts only; a divergence in intent was a step 3 question.
 - *Tasks* — one line each: `slug · level · goal`. Apply the splitting test above and
   say in one sentence what it answered; a count with no reasoning behind it is the
   sign you copied the source's structure instead of testing it.
 - *Backlog* — the small items, as the lines they will become.
 
+Below them, name by title the open questions the source still carries: those step 3
+did not ask, and any the user left unanswered, with the tasks each of those holds.
 Then wait for approval. If something does not deserve a task, say so and let the
 user decide. Do not shorten the list on your own judgment.
 
@@ -100,7 +140,7 @@ of two buckets — a task file, or a backlog line. There is no third bucket. An 
 left in your reply as "T0, no file needed" is the failure this procedure exists to
 prevent: the user approves the plan and their sentence is gone.
 
-**4. Where the detail goes.** A long plan does not belong in `## Steps`.
+**5. Where the detail goes.** A long plan does not belong in `## Steps`.
 
 - The source is already a document in the repo → do not copy it. `trail link` it.
 - No document, and the detail is the kind you would *look up* rather than
@@ -109,7 +149,7 @@ prevent: the user approves the plan and their sentence is gone.
   silently, and never for a small plan.
 - Otherwise the task file is enough.
 
-**5. Create what was approved.**
+**6. Create what was approved.**
 
 ```bash
 trail start <slug> <level> --title "<title>" --status open [--group <shared slug>]
@@ -127,14 +167,26 @@ and `trail block` take from then on. Never write an id by hand and never change 
 Pass `--group` on every task of a multi-task run: it is the only thing that will tell
 them apart from unrelated work three weeks from now.
 
-That last `--dropped` is the only record of what the user said and the plan did not
-take. `--task` is required throughout: a parked task is not the active one.
+The `trail log` line is each task's first log entry, and its `--dropped` is the only
+record of what the user said and that task did not take. It holds the task's own
+boundary, beside its `## Out of Scope`, and nothing wider. A cut that belongs to the
+whole source — a section no task takes, a question answered for the whole plan — is
+no single task's: write it into the source document next to what it cuts, where the
+next reader of that document meets it. When the source is not a document, it goes
+into the log of the group's first task, as an entry of its own. `--task` is required
+throughout: a parked task is not the active one.
 
-**6. The backlog is a sink, not a tracker.** No status, no board column, no
+A task held by an open question from step 3 is created like the rest, and the first
+step that needs the answer is blocked:
+`trail block <id> "open question: <title>" --task <slug>`. A blocked step is in every
+`trail status` until someone answers; a backlog line saying the same would wait where
+nobody looks.
+
+**7. The backlog is a sink, not a tracker.** No status, no board column, no
 distillation, no nudge, no per-item command. Promotion is `trail start` plus
 deleting the line by hand. Growing is normal; the failure signal is the opposite —
 backlog filling with things that were *done* means T0 has started paying a tax.
 
-**7. Leave everything `open`.** Starting without `--status open` marks a task active;
+**8. Leave everything `open`.** Starting without `--status open` marks a task active;
 in bulk that gives six active tasks and a useless `trail status`. Promote exactly one
 when work actually begins: then `/trail <slug>`, which resumes it. This skill ends here.

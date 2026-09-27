@@ -98,7 +98,7 @@ trail ls --stale 7                      # untouched for a week
 trail board                             # kanban, narrowed to the active group
 trail board --all                       # every group
 trail validate                          # every task file against the format
-trail done                              # mark done, report the backlog around it
+trail done                              # mark done, report the backlog and linked docs
 ```
 
 `## Steps` is a list of checkboxes — `[ ]` not started, `[/]` written but not

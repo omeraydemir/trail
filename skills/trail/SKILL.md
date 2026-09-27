@@ -61,7 +61,7 @@ dates things, it never leaves a section half-written, it keeps `level:` honest.
 | a new task | `trail start <slug> [T1\|T2] [--status open] [--group <g>]` |
 | picking one back up | `trail resume <slug>` — makes it active, prints its status |
 | a small item you are deferring | `trail backlog "<item>"` — tagged `#<active task>` |
-| closing | `trail done` — marks the task done, lists what is still open, reports the backlog around it |
+| closing | `trail done` — marks the task done, lists what is still open, reports the backlog around it and the linked `.md` docs to update |
 
 `<item>` is an id — `ap-k4m2`, as `status` prints it — or a piece of the item's
 text. One match acts. Zero or several are refused with the candidates listed, never

@@ -97,7 +97,8 @@ you came for.
   `ls` sections by it, and anything reading frontmatter from outside — a Dataview
   query in an Obsidian vault, a script — can select on it.
 - `links` is a flat list of repo paths, optionally `path:line`. Not validated.
-  It is how a task points at the design document or the code it concerns.
+  It is how a task points at the design or plan document or the code it concerns;
+  `trail done` lists the `.md` ones (see *What belongs in a task file*).
 
 There is still no parent task, no subtask, no dependency graph and no index file
 listing children. `group` carries the only relation that survived contact with real
@@ -290,10 +291,17 @@ the file stops answering "where am I", and the detail is re-read every session.
 A reference document lives under the repo's own docs convention, never inside
 `.trail/` — a different lifetime. trail links such a document; it does not own it.
 
-Drift between the two is not a real risk, because they do not overlap: the document
-holds the design and changes rarely, the task file holds the position and changes
-constantly. A design change is one `trail log` line (why) plus a document edit (what
-it now is).
+Whether the two drift depends on the document. A design document does not overlap the
+task file: it holds the design and changes rarely, the task file holds the position
+and changes constantly, and a design change is one `trail log` line (why) plus a
+document edit (what it now is). A plan document does overlap it — it says what is
+done and what comes next, which is the task file's status — and it drifts: in a real
+repo one still read "analysis, no code written" after the nine tasks that carried it
+out had closed. The status a plan document records changes when a task closes, so
+that is the moment to bring it back in line: `trail done` lists the task's linked
+`.md` documents (linked code and prototypes carry no status) as a reminder to update
+whichever one states that status. It writes nothing to them; trail links a document,
+it does not own it.
 
 ## Splitting work across task files
 
