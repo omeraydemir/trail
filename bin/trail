@@ -22,7 +22,7 @@ try:
 except ImportError:      # Windows: no advisory locks, writes stay unserialised
     fcntl = None
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # --------------------------------------------------------------------------
 # the frontmatter contract - every status, level and field trail knows, in one
