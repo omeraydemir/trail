@@ -13,12 +13,12 @@ is the product.
   tasks/<slug>.md     every task, open through done — files never move
 ```
 
-`trail init` also drops two skills where the repo's agents look for project skills:
-`trail/SKILL.md` (`/trail` — resume, work, log, close, start one task) and
-`trail-plan/SKILL.md` (`/trail-plan` — a document or brain dump into tasks and backlog
-lines), under `.claude/skills/` for Claude Code and `.agents/skills/` for Codex,
-Cursor and Gemini CLI. There is no single path every agent reads, and no single skill
-either: each file is complete for its own scenario, so a session loads one of them.
+The two skills are not part of the layout: `trail/SKILL.md` (`/trail` — resume, work,
+log, close, start one task) and `trail-plan/SKILL.md` (`/trail-plan` — a document or
+brain dump into tasks and backlog lines) are linked once per user, from
+`~/.claude/skills/` into the install clone, and `trail init` writes no copy into the
+repo — a copy would go stale with the next release. There is no single skill either:
+each file is complete for its own scenario, so a session loads one of them.
 
 trail keeps no second, repo-lifetime record. A decision log belongs to its task and
 stays in its file, which is now permanent; four closes across two real repos produced

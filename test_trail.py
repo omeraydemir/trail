@@ -79,17 +79,6 @@ def test_slugify():
     assert t.slugify("Push Notification  Deeplink!") == "push-notification-deeplink"
 
 
-def test_own_skill_copy_is_in_sync():
-    """This repo dogfoods trail, so it holds two copies of each SKILL.md.
-    They must not drift; the source of truth is skills/<name>/."""
-    for name in t.SKILLS:
-        src = HERE / "skills" / name / "SKILL.md"
-        dest = HERE / ".claude" / "skills" / name / "SKILL.md"
-        if dest.exists():
-            assert src.read_text("utf-8") == dest.read_text("utf-8"), \
-                "%s SKILL.md kopyalari ayrismis: 'trail init --force' ile tazele" % name
-
-
 def test_missing_scaffold_is_nudged_not_broken():
     """A repo initialised by an older trail keeps working; status says what to run."""
     tmp = Path(tempfile.mkdtemp())
@@ -347,10 +336,6 @@ def test_end_to_end():
         assert not (tmp / "DECISIONS.md").exists()
         # the sink must be visible before first use, or nobody knows to empty it
         assert (tmp / ".trail/backlog.md").is_file()
-        # no agent markers in a bare repo -> claude is the fallback
-        assert (tmp / ".claude/skills/trail/SKILL.md").is_file()
-        assert (tmp / ".claude/skills/trail-plan/SKILL.md").is_file()   # both entry points
-        assert not (tmp / ".agents").exists()
 
         tmp2 = Path(tempfile.mkdtemp())
         try:
@@ -362,28 +347,13 @@ def test_end_to_end():
             # the log stays in the task file; nothing is copied anywhere
             assert "keep me" in (tmp2 / ".trail/tasks/x.md").read_text("utf-8")
             assert not (tmp2 / "DECISIONS.md").exists()
-            # a hand-edited config.yml is user content: no drift warning, no clobber
+            # a hand-edited config.yml is user content: re-running init leaves it alone
             conf = tmp2 / ".trail/config.yml"
             conf.write_text(conf.read_text("utf-8") + "stale_days: 3\n", "utf-8")
-            assert "differs" not in run(tmp2, "init", "--force")
+            run(tmp2, "init")
             assert "stale_days: 3" in conf.read_text("utf-8")
         finally:
             shutil.rmtree(tmp2, ignore_errors=True)
-
-        # init never clobbers a drifted copy; it warns, and --force refreshes
-        skill = tmp / ".claude/skills/trail/SKILL.md"
-        skill.write_text("stale\n", "utf-8")
-        assert "differs" in run(tmp, "init")
-        assert skill.read_text("utf-8") == "stale\n"
-        run(tmp, "init", "--force")
-        assert skill.read_text("utf-8").startswith("---")
-
-        # an existing .codex marker routes the skill to the shared .agents path
-        (tmp / ".codex").mkdir()
-        run(tmp, "init")
-        assert (tmp / ".agents/skills/trail/SKILL.md").is_file()
-        # explicit override still works
-        run(tmp, "init", "--agent", "gemini")
 
         run(tmp, "start", "Deep Link", "T2", "--title", "deep link")
         f = tmp / ".trail/tasks/deep-link.md"
@@ -1472,30 +1442,24 @@ def test_a_plan_heading_is_not_read_as_steps():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_init_installs_both_skills():
-    """Two entry points, one install step: a repo that got only /trail never learns
-    that /trail-plan exists, and a drifted copy is the user's edit, not trail's."""
+def test_init_writes_no_skills_and_names_the_link_when_missing():
+    """The skills live once per user, linked from the install clone, so a release
+    cannot leave a repo holding an old copy. init only says how to link them."""
     tmp = Path(tempfile.mkdtemp())
     try:
-        subprocess.run(["git", "init", "-q"], cwd=str(tmp), check=True)
-        run(tmp, "init")
-        for name in t.SKILLS:
-            assert (tmp / ".claude/skills" / name / "SKILL.md").is_file(), name
-        assert not (tmp / ".agents").exists()
-
-        planned = tmp / ".claude/skills/trail-plan/SKILL.md"
-        planned.write_text("stale\n", "utf-8")
-        assert ".claude/skills/trail-plan/SKILL.md differs" in run(tmp, "init")
-        assert planned.read_text("utf-8") == "stale\n"          # warned, never clobbered
-        assert "(refreshed)" in run(tmp, "init", "--force")
-        assert planned.read_text("utf-8") == (HERE / "skills" / "trail-plan"
-                                              / "SKILL.md").read_text("utf-8")
-
-        # a .codex marker routes both files to the shared .agents path
-        (tmp / ".codex").mkdir()
-        run(tmp, "init")
-        for name in t.SKILLS:
-            assert (tmp / ".agents/skills" / name / "SKILL.md").is_file(), name
+        repo, home = tmp / "repo", tmp / "home"
+        repo.mkdir()
+        home.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+        env = dict(os.environ, HOME=str(home))
+        out = run(repo, "init", env=env)
+        assert "ln -s %s ~/.claude/skills/" % (HERE / "skills" / "*") in out
+        assert not (repo / ".claude").exists() and not (repo / ".agents").exists()
+        assert list(home.iterdir()) == []   # nothing outside the repo
+        # linked once -> silent from then on
+        (home / ".claude/skills").mkdir(parents=True)
+        (home / ".claude/skills/trail").symlink_to(HERE / "skills" / "trail")
+        assert "ln -s" not in run(repo, "init", env=env)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

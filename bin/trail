@@ -54,25 +54,6 @@ SECTIONS = {
 }
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
-# Where each agent reads project skills from. Claude Code does NOT read
-# .agents/skills/; the others do. Verified against the vendors' docs, not guessed.
-AGENT_SKILL_DIRS = {
-    "claude": ".claude/skills",
-    "codex": ".agents/skills",
-    "cursor": ".agents/skills",
-    "gemini": ".agents/skills",
-}
-# Two entry points, split by what the user is doing rather than by what the model
-# infers: `/trail` resumes and works, `/trail-plan` turns a document into tasks.
-# Each file is complete for its own scenario, so a session loads one of them.
-SKILLS = ("trail", "trail-plan")
-AGENT_MARKERS = {
-    "claude": ".claude",
-    "codex": ".codex",
-    "cursor": ".cursor",
-    "gemini": ".gemini",
-}
-
 BACKLOG_HEADER = (
     "# Backlog\n\nSmall items, no ceremony. Promote with `trail start <slug>` "
     "and delete the line.\n\n"
@@ -1047,19 +1028,9 @@ def cmd_init(args) -> int:
         if not keep.exists():
             keep.write_text("", "utf-8")
 
-    stale = []
-
-    def copy(src: Path, dst: Path, shipped: bool = False):
+    def copy(src: Path, dst: Path):
         if dst.exists():
-            # Only SKILL.md is shipped content; config.yml and _template.md are
-            # meant to be edited, so drift there is the point, not a problem.
-            if shipped and src.read_bytes() != dst.read_bytes():
-                if args.force:
-                    shutil.copyfile(src, dst)
-                    made.append(str(dst.relative_to(root)) + " (refreshed)")
-                else:
-                    stale.append(str(dst.relative_to(root)))
-            return
+            return   # config.yml and _template.md are meant to be edited
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
         made.append(str(dst.relative_to(root)))
@@ -1069,20 +1040,6 @@ def cmd_init(args) -> int:
 
     cfg = load_config(root)
     copy(INSTALL_ROOT / "templates" / "_template.md", root / ".trail" / "_template.md")
-    # `.agents/skills` is a destination this tool writes to, so a repo that already
-    # has one is already an agent repo - detecting only the per-vendor markers sent
-    # those repos back to the Claude default.
-    agents = args.agent or [a for a, m in AGENT_MARKERS.items() if (root / m).is_dir()]
-    if not args.agent and (root / ".agents" / "skills").is_dir():
-        agents.append("codex")   # any of codex/cursor/gemini resolves to .agents/skills
-    if "all" in agents:
-        agents = list(AGENT_SKILL_DIRS)
-    if not agents:
-        agents = ["claude"]
-    for skills_dir in sorted({AGENT_SKILL_DIRS[a] for a in agents}):
-        for name in SKILLS:
-            copy(INSTALL_ROOT / "skills" / name / "SKILL.md",
-                 root / skills_dir / name / "SKILL.md", shipped=True)
 
     ign = root / ".trail" / ".gitignore"
     if not ign.exists():
@@ -1101,8 +1058,10 @@ def cmd_init(args) -> int:
         print("  + %s" % m)
     if not made:
         print("  (everything already in place)")
-    for s in stale:
-        print("  ! %s differs from the installed copy - 'trail init --force' overwrites it" % s)
+    # the skills are linked once per user, not copied per repo, so a release can
+    # never leave a repo holding an old copy
+    if not (Path.home() / ".claude" / "skills" / "trail").exists():
+        print("  ! skills not linked: ln -s %s ~/.claude/skills/" % (INSTALL_ROOT / "skills" / "*"))
     print("\nnext: trail start <slug> [%s]" % "|".join(LEVELS))
     print("note: .trail/ is committed by default. Add it to .gitignore if you'd rather not.")
     return 0
@@ -1852,11 +1811,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("init", help="set up .trail/ in this repo")
-    s.add_argument("--force", action="store_true",
-                   help="overwrite a SKILL.md that has drifted from the installed copy")
-    s.add_argument("--agent", action="append",
-                   choices=sorted(AGENT_SKILL_DIRS) + ["all"],
-                   help="where to write SKILL.md (default: detect the agents this repo uses)")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("start", help="new task file")

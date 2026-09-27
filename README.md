@@ -42,9 +42,13 @@ free.
 ```bash
 git clone https://github.com/omeraydemir/trail.git ~/.local/share/trail
 ln -s ~/.local/share/trail/bin/trail ~/.local/bin/trail
+mkdir -p ~/.claude/skills
+ln -s ~/.local/share/trail/skills/* ~/.claude/skills/
 ```
 
 Requires Python 3.9+ (preinstalled on macOS and most Linux). No pip, no venv.
+Both are links into the clone, so `git -C ~/.local/share/trail pull` updates the CLI
+and the skills together.
 
 Then, in any repo:
 
@@ -52,17 +56,15 @@ Then, in any repo:
 trail init
 ```
 
-This creates `.trail/` (including an empty `backlog.md`) and two skills for whichever
-agents the repo already uses: `/trail` resumes a task, works it, logs, hands off and
-closes it — one task at a time — and `/trail-plan` turns a document or a brain dump
-into tasks and backlog lines. Each is complete on its own, so a session loads one of
-them. Agents disagree about where project skills live — Claude Code reads
-`.claude/skills/`, while Codex, Cursor and Gemini CLI read `.agents/skills/` — so
-`init` detects the marker directories present and writes to the right ones.
+This creates `.trail/` (including an empty `backlog.md`) and nothing else: the two
+skills were installed once, above, not per repo. `/trail` resumes a task, works it,
+logs, hands off and closes it — one task at a time — and `/trail-plan` turns a
+document or a brain dump into tasks and backlog lines. Each is complete on its own,
+so a session loads one of them. If they are not linked yet, `init` prints the
+`ln -s` line.
 
-`init` never overwrites what is already there — `--force` refreshes a drifted skill
-copy, and leaves your `config.yml` and `_template.md` alone.
-Force it with `trail init --agent claude|codex|cursor|gemini|all`.
+`init` never overwrites what is already there, so your `config.yml` and
+`_template.md` are left alone.
 
 ## Use
 
